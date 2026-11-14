@@ -550,7 +550,10 @@ fn driver(game: &mut Game<'_>) {
                     s.replanned = false;
                 });
             }
-            None => rt::with(|s| s.stuck = 120)
+            None => rt::with(|s| {
+                s.note = format!("no path from {:?} to {:?} (me {:?})", start, goal, me);
+                s.stuck = 120
+            })
         }
     }
 
@@ -561,20 +564,21 @@ fn driver(game: &mut Game<'_>) {
     {
         let w = pf::W { game };
         let stale = rt::with(|s| {
-            s.path[s.at..]
-                .iter()
-                .take(10)
-                .any(|m| {
-                    match m.kind {
-                        pf::Kind::Walk
-                        | pf::Kind::Step
-                        | pf::Kind::Ladder { .. }
-                        | pf::Kind::Drop { .. }
-                        | pf::Kind::Parkour { .. } => !w.standable(m.pos),
-                        pf::Kind::Swim => !w.water(m.pos),
-                        _ => false,
-                    }
-                })
+            let bad = s.path[s.at..].iter().take(10).find(|m| {
+                match m.kind {
+                    pf::Kind::Walk
+                    | pf::Kind::Step
+                    | pf::Kind::Ladder { .. }
+                    | pf::Kind::Parkour { .. } => !w.standable(m.pos),
+                    pf::Kind::Drop { .. } => !w.standable(m.pos) && !w.water(m.pos),
+                    pf::Kind::Swim => !w.water(m.pos),
+                    _ => false,
+                }
+            });
+            if let Some(m) = bad {
+                s.note = format!("stale {:?} at {:?}", m.kind, m.pos);
+            }
+            bad.is_some()
         });
         if stale {
             rt::with(|s| s.path.clear());

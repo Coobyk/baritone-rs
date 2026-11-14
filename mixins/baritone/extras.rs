@@ -499,7 +499,7 @@ fn proc(game: &mut Game<'_>) {
             s.objective,
             // Live diagnostics: current move kind, wanted inputs, stuck ticks.
             format!(
-                "move={:?} to={:?} want.f={} j={} sn={} atk={} use={} stuck={} busy={} last={:?}",
+                "move={:?} to={:?} want.f={} j={} sn={} atk={} use={} stuck={} busy={} last={:?} {}",
                 s.path.get(s.at).map(|m| &m.kind),
                 s.path.get(s.at).map(|m| m.pos),
                 s.want.forward,
@@ -510,6 +510,7 @@ fn proc(game: &mut Game<'_>) {
                 s.stuck,
                 s.busy as u8,
                 s.last_pos,
+                s.note,
             ),
         )
     });

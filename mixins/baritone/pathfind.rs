@@ -225,7 +225,6 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
     // open depth, and "dropping" to the lakebed is drowning, not a move.
     if !w.floor(p) && !w.water(p) {
         let bound = o.max_drop * 3;
-        let mut wet = false;
         let mut d = 1;
         while d <= bound {
             let c = [p[0], p[1] - d, p[2]];
@@ -233,13 +232,22 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 break;
             }
             if w.water(c) {
-                wet = true;
-            } else if !w.body_open(c) {
+                // Splash down at the surface, not on the lakebed.
+                if d >= 2 {
+                    out.push(Move {
+                        pos: c,
+                        kind: Kind::Drop { n: d as i8 },
+                        cells: vec![],
+                    });
+                }
+                break;
+            }
+            if !w.body_open(c) {
                 break;
             }
             if w.floor(c) {
                 let dmg = d - 3;
-                if d >= 2 && (wet || (d <= o.max_drop && dmg < 10)) {
+                if d >= 2 && d <= o.max_drop && dmg < 10 {
                     out.push(Move {
                         pos: c,
                         kind: Kind::Drop { n: d as i8 },
@@ -282,7 +290,6 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
         // Drop down the ledge: past max_drop only into water (see above).
         if w.body_open(n) {
             let bound = o.max_drop * 3;
-            let mut wet = w.water(n);
             let mut d = 1;
             while d <= bound {
                 let c = [n[0], n[1] - d, n[2]];
@@ -290,13 +297,21 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                     break;
                 }
                 if w.water(c) {
-                    wet = true;
-                } else if !w.body_open(c) {
+                    // First water cell in the descent is the surface: splash
+                    // down there, never at the lakebed under it.
+                    out.push(Move {
+                        pos: c,
+                        kind: Kind::Drop { n: d as i8 },
+                        cells: vec![],
+                    });
+                    break;
+                }
+                if !w.body_open(c) {
                     break;
                 }
                 if w.floor(c) {
                     let dmg = d - 3;
-                    if wet || (d <= o.max_drop && dmg < 10) {
+                    if d <= o.max_drop && dmg < 10 {
                         out.push(Move {
                             pos: c,
                             kind: Kind::Drop { n: d as i8 },

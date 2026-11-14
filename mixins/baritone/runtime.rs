@@ -88,6 +88,8 @@ pub struct State {
     pub visited: std::collections::HashSet<(i32, i32)>,
     /// Xorshift rng for explore.
     pub rng: u64,
+    /// Diagnostic: why the last plan/stale-check did what it did.
+    pub note: String,
 }
 
 impl State {
@@ -117,6 +119,7 @@ impl State {
             },
             visited: std::collections::HashSet::new(),
             rng: 0x9e3779b97f4a7c15,
+            note: String::new(),
         }
     }
 

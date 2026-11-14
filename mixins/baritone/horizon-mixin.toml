@@ -1,6 +1,6 @@
 [mod]
 id = "baritone"
-version = "0.3.11"
+version = "0.3.13"
 priority = 100
 
 [compatibility]
