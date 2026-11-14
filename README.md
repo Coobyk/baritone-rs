@@ -1,50 +1,46 @@
-# Baritone for Horizon
+# baritone-rs
 
-A walking-only [Baritone](https://github.com/cabaletta/baritone)-style
-pathing mod for [Horizon](https://github.com/horizon-rust/horizon), as a
-native mixin bundle.
+A [Baritone](https://github.com/cabaletta/baritone)-style pathing bot for
+[Horizon](https://github.com/horizon-rust/horizon), as a native mixin mod
+(`baritone.hnmod`).
 
-## Commands
+## Commands — `/b` or `/baritone`
 
-Typed in chat as client commands (`/` commands; the chat box completes and
-colours `b` and `baritone`):
+| Command | What it does |
+| --- | --- |
+| `/b goto <x> <z>` | Walk to the standable surface at that column |
+| `/b goto <x> <y> <z>` | Walk to an exact cell |
+| `/b goto y <y>` | Reach a Y level |
+| `/b mine <block>` | Find and dig out matching blocks (e.g. `diamond_ore`, `log`, comma-separated) |
+| `/b follow <entity>` | Stay near the nearest mob of that kind (or custom name) |
+| `/b explore` | Wander to unvisited spots |
+| `/b tunnel [n]` | Dig and walk straight ahead (default 64) |
+| `/b thisway [n]` | Walk n blocks in the facing direction |
+| `/b axis` | Walk to the nearest coordinate axis |
+| `/b pause` `/b resume` `/b stop` `/b path` | Control the active task |
+| `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `drop`, `radius` |
+| `/b goal` `/b help` | Status and usage |
 
-- `/b goto <x> <z>` — walk to the column's surface nearest your height
-- `/b goto <x> <y> <z>` — walk to an exact block
-- `/b stop` (`cancel`, `pause`) — stop walking
-- `/b path` (`repath`) — recompute from where you stand
-- `/b sprint [on|off]` — sprint while walking (default on, persisted)
+## Movements
 
-Feedback (`walking to …`, `arrived`, `stuck, giving up`) prints as client
-chat lines.
+Cost-weighted A* over block cells: walk, step-up, drops (up to
+`max_drop`), parkour gaps (1–2 cells), ladder/vine/scaffold climbs,
+water, **break-through** (digs walls when `allow_break`), **pillar**
+(jump + place underfoot) and **bridge** (sneak + place ahead) when
+`allow_place` and a placeable block is held.
 
-## What it does
+Breaking and placing run through the game's own input: the mod points
+`forced_hit` at the target face and holds `left`/`right`, so the normal
+dig timer and use rules apply.
 
-- A* over the block grid (`pathfind.rs`): steps up one block, drops up to
-  four, cuts diagonals only between open corners. Floors are `full_collision`
-  blocks; the body needs two open cells. Unloaded chunks are not walked into.
-- Follows the path in `native_tick` (`glue.rs`): faces each node's centre,
-  drives forward through `native_movement_input`, jumps onto step-ups, and
-  re-plans once when stuck.
-- It does **not** break or place blocks, bridge, pillar, climb ladders, mine,
-  or swim — vanilla Baritone features that need those are future work.
+## Not ported
+
+Schematic building (`#build`), waypoints, selection API, elytra,
+lava/liquid pathing beyond water swims, fall-damage-aware drops, and
+Baritone's chunk cache.
 
 ## Layout
 
-A mixin bundle (`mixins/baritone/`, `horizon-mixin.toml`):
-
-- `pathfind.rs` — the A* and the block-space rules.
-- `runtime.rs` — the pathing state statics.
-- `glue.rs` — `native_command`/`native_commands`, the tick driver,
-  `native_movement_input`, the mod listing and the buttons page.
-- `hooks/` — one thin wrapper per injection.
-
-## Building
-
-```sh
-horizon-mixins plan --workspace <horizon source> --mods mixins/baritone --out plan.json
-horizon-mixins apply --workspace <horizon source> --mods mixins/baritone --out <staged>
-```
-
-or `horizon-launcher native-build <folder> --trust-native-code`. Target
-revision in `compatibility.json`.
+`mixins/baritone/` — `pathfind.rs` (A* + movement actions), `exec.rs`
+(move executor), `runtime.rs` (state/processes/settings), `glue.rs`
+(commands, driver, settings page), `hooks/` (injection helpers).
