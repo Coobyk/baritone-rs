@@ -1,6 +1,6 @@
 [mod]
 id = "baritone"
-version = "0.1.0"
+version = "0.2.0"
 priority = 100
 
 [compatibility]
@@ -17,6 +17,12 @@ id = "pathfind"
 file = "crates/horizon-client/src/game.rs"
 name = "umbx_pathfind"
 source = "pathfind.rs"
+
+[[module]]
+id = "exec"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_exec"
+source = "exec.rs"
 
 [[module]]
 id = "glue"
