@@ -76,6 +76,9 @@ pub struct State {
     pub tunnel_dir: [i32; 2],
     /// The process's current target cell (mine block, follow spot, ...).
     pub objective: Option<[i32; 3]>,
+    /// A feature module's process is active: the input hook should apply
+    /// `want` even though `proc` is None (module drives its own moves).
+    pub busy: bool,
     /// Latest executor request for the input hook.
     pub want: Want,
     pub set: Settings,
@@ -97,6 +100,7 @@ impl State {
             last_pos: [i32::MIN; 3],
             replanned: false,
             cooldown: 0,
+            busy: false,
             objective: None,
             tunnel_dir: [0, 0],
             want: Want::default(),
@@ -117,6 +121,7 @@ impl State {
     /// Stop whatever is running and clear motion state.
     pub fn halt(&mut self) {
         self.proc = Proc::None;
+        self.busy = false;
         self.objective = None;
         self.path.clear();
         self.at = 0;

@@ -84,8 +84,7 @@ pub(super) fn page(game: &Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
     if mod_id != rt::ID {
         return;
     }
-    let (proc, set) = rt::with(|s| (s.proc, s.set));
-    let _ = proc;
+    let set = rt::with(|s| s.set);
     buttons.extend([
         format!("Sprint: {}", if set.sprint { "on" } else { "off" }),
         format!("Allow break: {}", if set.allow_break { "on" } else { "off" }),
@@ -100,7 +99,12 @@ pub(super) fn page(game: &Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
         "Stop".to_owned(),
         "Commands: /b help in chat".to_owned(),
     ]);
-    let _ = game;
+    crate::game::umbx_baritone_sel::settings(game, buttons);
+    crate::game::umbx_baritone_build::settings(game, buttons);
+    crate::game::umbx_baritone_extras::settings(game, buttons);
+    crate::game::umbx_baritone_farm::settings(game, buttons);
+    crate::game::umbx_baritone_render::settings(game, buttons);
+    crate::game::umbx_baritone_elytra::settings(game, buttons);
 }
 
 /// `native_settings_click`: the buttons' actions, in `page` order.
@@ -119,6 +123,47 @@ pub(super) fn click(game: &mut Game<'_>, mod_id: &str, button: usize) {
         }),
         6 => rt::with(|s| s.set.pause = !s.set.pause),
         7 => rt::with(|s| s.halt()),
+        _ if button >= 9 => {
+            // Walk the module sections; each module's `settings` fixes its
+            // section size.
+            let mut at = button - 9;
+            for (s_fn, c_fn) in [
+                (
+                    crate::game::umbx_baritone_sel::settings
+                        as fn(&Game<'_>, &mut Vec<String>),
+                    crate::game::umbx_baritone_sel::click
+                        as fn(&mut Game<'_>, usize) -> bool,
+                ),
+                (
+                    crate::game::umbx_baritone_build::settings,
+                    crate::game::umbx_baritone_build::click,
+                ),
+                (
+                    crate::game::umbx_baritone_extras::settings,
+                    crate::game::umbx_baritone_extras::click,
+                ),
+                (
+                    crate::game::umbx_baritone_farm::settings,
+                    crate::game::umbx_baritone_farm::click,
+                ),
+                (
+                    crate::game::umbx_baritone_render::settings,
+                    crate::game::umbx_baritone_render::click,
+                ),
+                (
+                    crate::game::umbx_baritone_elytra::settings,
+                    crate::game::umbx_baritone_elytra::click,
+                ),
+            ] {
+                let mut tmp = Vec::new();
+                s_fn(game, &mut tmp);
+                if at < tmp.len() {
+                    c_fn(game, at);
+                    break;
+                }
+                at -= tmp.len();
+            }
+        }
         _ => {}
     }
     save(game);
@@ -145,8 +190,18 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
         Some("tunnel" | "t") => tunnel(game, &args[1..]),
         Some("thisway") => thisway(game, &args[1..]),
         Some("axis") => axis(game),
-        Some("goal") => goal_info(game),
-        Some("path" | "repath") => rt::with(|s| s.path.clear()),
+        // `goal`/`path`/`set` may be module commands (stored goal, cfg
+        // settings); the module gets first refusal, the core falls through.
+        Some("goal") => {
+            if !crate::game::umbx_baritone_extras::command(game, &args) {
+                goal_info(game)
+            }
+        }
+        Some("path" | "repath") => {
+            if !crate::game::umbx_baritone_extras::command(game, &args) {
+                rt::with(|s| s.path.clear())
+            }
+        }
         Some("pause") => {
             rt::with(|s| s.set.pause = true);
             game.native_chat("baritone: paused");
@@ -159,9 +214,24 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
             rt::with(|s| s.halt());
             game.native_chat("baritone: stopped");
         }
-        Some("set" | "s") => set(game, &args[1..]),
+        Some("set" | "s") => {
+            if !crate::game::umbx_baritone_extras::command(game, &args) {
+                set(game, &args[1..])
+            }
+        }
         Some("sprint") => set(game, &["sprint", args.get(1).copied().unwrap_or("on")]),
-        _ => game.native_chat("baritone: unknown command — /b help"),
+        _ => {
+            // Feature modules, in Baritone's command order.
+            let handled = crate::game::umbx_baritone_sel::command(game, &args)
+                || crate::game::umbx_baritone_build::command(game, &args)
+                || crate::game::umbx_baritone_extras::command(game, &args)
+                || crate::game::umbx_baritone_farm::command(game, &args)
+                || crate::game::umbx_baritone_render::command(game, &args)
+                || crate::game::umbx_baritone_elytra::command(game, &args);
+            if !handled {
+                game.native_chat("baritone: unknown command — /b help");
+            }
+        }
     }
 }
 
@@ -175,6 +245,18 @@ fn help(game: &mut Game<'_>) {
         "/b set <sprint|break|place|parkour|drop|radius> [v]",
     ] {
         game.native_chat(&format!("baritone: {line}"));
+    }
+    for lines in [
+        crate::game::umbx_baritone_sel::help(),
+        crate::game::umbx_baritone_build::help(),
+        crate::game::umbx_baritone_extras::help(),
+        crate::game::umbx_baritone_farm::help(),
+        crate::game::umbx_baritone_render::help(),
+        crate::game::umbx_baritone_elytra::help(),
+    ] {
+        for line in lines {
+            game.native_chat(&format!("baritone: {line}"));
+        }
     }
 }
 
@@ -365,6 +447,13 @@ pub(super) fn tick(game: &mut Game<'_>) {
         }
     });
     driver(game);
+    // Feature modules drive themselves when active (they set s.busy).
+    crate::game::umbx_baritone_sel::tick(game);
+    crate::game::umbx_baritone_build::tick(game);
+    crate::game::umbx_baritone_extras::tick(game);
+    crate::game::umbx_baritone_farm::tick(game);
+    crate::game::umbx_baritone_render::tick(game);
+    crate::game::umbx_baritone_elytra::tick(game);
 }
 
 /// `native_tick`'s real work. Processes pick objectives; the path layer walks
@@ -686,7 +775,7 @@ pub(super) fn movement_input(
         return;
     }
     rt::with(|s| {
-        if s.proc == rt::Proc::None || s.set.pause {
+        if (s.proc == rt::Proc::None && !s.busy) || s.set.pause {
             return;
         }
         if s.want.forward != 0.0 {

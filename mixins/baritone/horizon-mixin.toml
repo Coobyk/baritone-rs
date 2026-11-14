@@ -1,6 +1,6 @@
 [mod]
 id = "baritone"
-version = "0.2.0"
+version = "0.3.0"
 priority = 100
 
 [compatibility]
@@ -17,6 +17,42 @@ id = "pathfind"
 file = "crates/horizon-client/src/game.rs"
 name = "umbx_pathfind"
 source = "pathfind.rs"
+
+[[module]]
+id = "sel"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_sel"
+source = "sel.rs"
+
+[[module]]
+id = "build"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_build"
+source = "build.rs"
+
+[[module]]
+id = "extras"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_extras"
+source = "extras.rs"
+
+[[module]]
+id = "farm"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_farm"
+source = "farm.rs"
+
+[[module]]
+id = "render"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_render"
+source = "render.rs"
+
+[[module]]
+id = "elytra"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_elytra"
+source = "elytra.rs"
 
 [[module]]
 id = "exec"
@@ -102,4 +138,25 @@ bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
   { name = "mod_id", ty = "&str", value = "mod_id" },
   { name = "button", ty = "usize", value = "button" },
+]
+
+[[injection]]
+id = "visuals"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_visuals"
+helper = "hooks/visuals.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "rims", ty = "&mut Vec<crate::game::native_hooks::NativeBlockRim>", value = "&mut *rims" },
+  { name = "lights", ty = "&mut Vec<crate::game::native_hooks::NativeColoredLight>", value = "&mut *lights" },
+]
+
+[[injection]]
+id = "world"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_world_submit"
+helper = "hooks/world.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "draw", ty = "&mut crate::mod_api::NativeWorldDraw", value = "&mut *draw" },
 ]

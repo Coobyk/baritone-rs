@@ -1,7 +1,8 @@
 // A* over block cells with Baritone-style movement actions. A node is a
 // standable cell; an edge is a Movement (walk, step, drop, parkour jump,
-// ladder climb, swim, break-through, pillar, bridge). Break/place edges only
-// appear when the matching `allow_*` flag is on.
+// ladder climb, swim, break-through, pillar, bridge, diagonal traverse,
+// downward dig). Break/place edges only appear when the matching `allow_*`
+// flag is on.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -26,16 +27,23 @@ pub enum Kind {
     Pillar,
     /// Cross to a floor-less cell, placing the floor first.
     Bridge,
+    /// Diagonal Bridge: place the diagonal floor off an orth neighbour's
+    /// side face (plus an approach support when its floor is gone too).
+    Traverse,
+    /// Dig straight down through the floor under our feet and drop in.
+    Downward,
 }
 
 /// One path edge: arrive at `pos` by `kind`, breaking `cells` first when
-/// `kind == Break` or placing `cells` when `kind` is Pillar/Bridge.
+/// `kind` is Break/Downward or placing `cells` when kind is Pillar/Bridge/
+/// Traverse.
 #[derive(Clone)]
 pub struct Move {
     pub pos: [i32; 3],
     pub kind: Kind,
-    /// Blocks to break (Break) or the cell to place (Pillar/Bridge) plus the
-    /// support hit as `cells[1]` (`cells[0]` is always the placed cell).
+    /// Blocks to break (Break/Downward) or cells to place in order
+    /// (Pillar/Bridge/Traverse — Traverse may list an approach support
+    /// before the diagonal floor, which is always `cells` last).
     pub cells: Vec<[i32; 3]>,
 }
 
@@ -75,9 +83,16 @@ impl W<'_> {
         !f.full_collision && f.fluid != horizon_items::blocks::Fluid::Lava
     }
 
+    /// The block at `p` can hold weight: full collision, or a slab/stairs
+    /// (all halves accepted — slightly generous for top slabs).
+    fn block_solid(&self, p: [i32; 3]) -> bool {
+        let f = self.fat(p);
+        f.full_collision || f.name.contains("slab") || f.name.contains("stairs")
+    }
+
     /// Something solid to stand on under `p`.
     pub fn floor(&self, p: [i32; 3]) -> bool {
-        self.fat([p[0], p[1] - 1, p[2]]).full_collision
+        self.block_solid([p[0], p[1] - 1, p[2]])
     }
 
     /// `p` is standable: two open cells over a floor.
@@ -103,6 +118,17 @@ impl W<'_> {
 
     fn water(&self, p: [i32; 3]) -> bool {
         self.fat(p).fluid == horizon_items::blocks::Fluid::Water
+    }
+
+    fn lava(&self, p: [i32; 3]) -> bool {
+        self.fat(p).fluid == horizon_items::blocks::Fluid::Lava
+    }
+
+    /// Any of `p`'s 4 side neighbours is lava (a cost penalty, not a ban).
+    fn lava_near(&self, p: [i32; 3]) -> bool {
+        [[1, 0], [-1, 0], [0, 1], [0, -1]]
+            .iter()
+            .any(|[dx, dz]| self.lava([p[0] + dx, p[1], p[2] + dz]))
     }
 }
 
@@ -155,16 +181,61 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
             });
         }
     }
-    // Straight drop of 2..=max_drop when the ledge under us is open air.
+    // Downward: dig straight through the floor we stand on and drop in. The
+    // cell below must be landable — solid-but-breakable, or an open shaft
+    // that bottoms out inside max_drop. Never into lava, never through
+    // unbreakable.
+    if o.allow_break && w.floor(p) {
+        let fc = [p[0], p[1] - 1, p[2]];
+        let below = [p[0], p[1] - 2, p[2]];
+        let below_ok = if w.open_cell(below) {
+            // Open shaft: it must reach a solid landing inside max_drop.
+            let mut ok = false;
+            let mut d = 3;
+            while d <= o.max_drop + 1 {
+                let c = [p[0], p[1] - d, p[2]];
+                if w.lava(c) {
+                    break;
+                }
+                if !w.open_cell(c) {
+                    // Solid landing; the open cell above is where we stop.
+                    ok = true;
+                    break;
+                }
+                d += 1;
+            }
+            ok
+        } else {
+            w.breakable(below)
+        };
+        if w.breakable(fc) && below_ok {
+            out.push(Move {
+                pos: fc,
+                kind: Kind::Downward,
+                cells: vec![fc],
+            });
+        }
+    }
+    // Straight drop when the ledge under us is open air. Past max_drop (up
+    // to max_drop*3) only when the fall ends in water; dry falls worth
+    // >=10hp damage are skipped.
     if !w.floor(p) {
+        let bound = o.max_drop * 3;
+        let mut wet = false;
         let mut d = 1;
-        while d <= o.max_drop {
+        while d <= bound {
             let c = [p[0], p[1] - d, p[2]];
-            if !w.body_open(c) {
+            if w.lava(c) {
+                break;
+            }
+            if w.water(c) {
+                wet = true;
+            } else if !w.body_open(c) {
                 break;
             }
             if w.floor(c) {
-                if d >= 2 {
+                let dmg = d - 3;
+                if d >= 2 && (wet || (d <= o.max_drop && dmg < 10)) {
                     out.push(Move {
                         pos: c,
                         kind: Kind::Drop { n: d as i8 },
@@ -204,29 +275,47 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
             });
             continue;
         }
-        // Drop down the ledge (2..=max_drop).
+        // Drop down the ledge: past max_drop only into water (see above).
         if w.body_open(n) {
+            let bound = o.max_drop * 3;
+            let mut wet = w.water(n);
             let mut d = 1;
-            while d <= o.max_drop {
+            while d <= bound {
                 let c = [n[0], n[1] - d, n[2]];
-                if !w.body_open(c) {
+                if w.lava(c) {
+                    break;
+                }
+                if w.water(c) {
+                    wet = true;
+                } else if !w.body_open(c) {
                     break;
                 }
                 if w.floor(c) {
-                    out.push(Move {
-                        pos: c,
-                        kind: Kind::Drop { n: d as i8 },
-                        cells: vec![],
-                    });
+                    let dmg = d - 3;
+                    if wet || (d <= o.max_drop && dmg < 10) {
+                        out.push(Move {
+                            pos: c,
+                            kind: Kind::Drop { n: d as i8 },
+                            cells: vec![],
+                        });
+                    }
                     break;
                 }
                 d += 1;
             }
         }
-        // Swim: neighbours inside water.
+        // Swim: neighbours inside water (walk in from dry land too).
         if w.water(n) && w.open_cell([n[0], n[1] + 1, n[2]]) {
             out.push(Move {
                 pos: n,
+                kind: Kind::Swim,
+                cells: vec![],
+            });
+        }
+        // Swim up: while inside water, rise toward the surface.
+        if w.water(p) && w.water([n[0], n[1] + 1, n[2]]) {
+            out.push(Move {
+                pos: [n[0], n[1] + 1, n[2]],
                 kind: Kind::Swim,
                 cells: vec![],
             });
@@ -260,6 +349,32 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 kind: Kind::Bridge,
                 cells: vec![[n[0], n[1] - 1, n[2]]],
             });
+        }
+        // Traverse: diagonal Bridge — `n`'s floor hangs on a side face of an
+        // orth neighbour's floor. When an orth floor is also missing it is
+        // placed first off our own floor's side face (two placements max).
+        if diag && o.allow_place && w.body_open(n) && !w.floor(n) && !w.climbable(p) {
+            let af = [p[0] + dx, p[1] - 1, p[2]];
+            let bf = [p[0], p[1] - 1, p[2] + dz];
+            let sa = w.block_solid(af);
+            let sb = w.block_solid(bf);
+            // `n`'s floor needs at least one existing orth side face.
+            if sa || sb {
+                let our = [p[0], p[1] - 1, p[2]];
+                let mut cells = Vec::new();
+                if !sa && w.block_solid(our) {
+                    cells.push(af);
+                }
+                if !sb && w.block_solid(our) {
+                    cells.push(bf);
+                }
+                cells.push([n[0], n[1] - 1, n[2]]);
+                out.push(Move {
+                    pos: n,
+                    kind: Kind::Traverse,
+                    cells,
+                });
+            }
         }
         // Break: the body is walled by breakable blocks.
         if o.allow_break && !diag {
@@ -357,17 +472,39 @@ pub fn find(
         let mut ns = Vec::new();
         succ(w, p, o, &mut ns);
         for m in ns {
-            let edge = match m.kind {
+            // Never end a move with lava at feet, head or floor.
+            if w.lava(m.pos)
+                || w.lava([m.pos[0], m.pos[1] + 1, m.pos[2]])
+                || w.lava([m.pos[0], m.pos[1] - 1, m.pos[2]])
+            {
+                continue;
+            }
+            let mut edge = match m.kind {
                 Kind::Walk => if (m.pos[0] - p[0]).abs() + (m.pos[2] - p[2]).abs() == 2 { 1.42 } else { 1.0 },
                 Kind::Step => 2.0,
-                Kind::Drop { n } => 1.0 + n as f64 * 0.6,
+                Kind::Drop { n } => {
+                    // A fall through water has no damage cost.
+                    let wet = (m.pos[1]..p[1])
+                        .any(|y| w.water([m.pos[0], y, m.pos[2]]));
+                    let mut e = 1.0 + n as f64 * 0.6;
+                    if !wet && n > 3 {
+                        e += (n as f64 - 3.0) * 0.5;
+                    }
+                    e
+                }
                 Kind::Parkour { gap } => 2.0 + gap as f64,
                 Kind::Ladder { .. } => 1.8,
                 Kind::Swim => 2.2,
                 Kind::Break { .. } => 1.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
+                Kind::Downward => 2.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Pillar => 3.5,
                 Kind::Bridge => 3.0,
+                Kind::Traverse => 4.0,
             };
+            // Standing next to lava is risky: prefer routes that keep away.
+            if w.lava_near(m.pos) {
+                edge += 5.0;
+            }
             let ng = gp + edge;
             if ng < *g.get(&m.pos).unwrap_or(&f64::INFINITY) {
                 g.insert(m.pos, ng);
