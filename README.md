@@ -19,6 +19,14 @@ A [Baritone](https://github.com/cabaletta/baritone)-style pathing bot for
 | `/b axis` | Walk to the nearest coordinate axis |
 | `/b pause` `/b resume` `/b stop` `/b path` | Control the active task |
 | `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `drop`, `radius` |
+| `/b sel ...` | Selections: pos1/pos2, fill, replace, walls, shell, expand, shift, copy/cut/paste |
+| `/b build <name>` | Build a `.schematic` file; `/b build` resumes the queue |
+| `/b farm [r]` | Harvest, replant and till farmland |
+| `/b wp save\|list\|goto\|delete\|clear` | Waypoints |
+| `/b find <block>` `/b surface` `/b come` `/b invert` `/b blacklist` | More goals |
+| `/b render <path\|goal\|waypoints>` | World overlays: path crumbs, goal rim, waypoint labels |
+| `/b elytra <x> <z>` | Best-effort elytra glide (see below) |
+| `/b proc` `/b eta` `/b version` `/b modified` `/b reset` | Status/settings |
 | `/b goal` `/b help` | Status and usage |
 
 ## Movements
@@ -33,11 +41,19 @@ Breaking and placing run through the game's own input: the mod points
 `forced_hit` at the target face and holds `left`/`right`, so the normal
 dig timer and use rules apply.
 
+## Elytra
+
+`/b elytra` is the honest simplified port: launch → deploy on the
+jump-edge like vanilla `tryToStartFallFlying` → steer yaw at the goal,
+cruise/flare pitch, firework boost if one is held. It is best-effort,
+not Baritone's full elytra solver.
+
 ## Not ported
 
-Schematic building (`#build`), waypoints, selection API, elytra,
-lava/liquid pathing beyond water swims, fall-damage-aware drops, and
-Baritone's chunk cache.
+Baritone's long-range chunk cache/waypoint world data, `assume*`
+walk-on-lava cheats, mob-avoidance path costs, and its ~80 individual
+settings beyond the ones here (`/b set` still accepts their names and
+stores them harmlessly).
 
 ## Layout
 
