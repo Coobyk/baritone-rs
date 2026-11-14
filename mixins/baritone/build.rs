@@ -353,13 +353,16 @@ fn driver(game: &mut Game<'_>) {
             j.target = None;
             was
         });
-        rt::with(|s| {
-            s.busy = false;
-            s.objective = None;
-            s.want = rt::Want::default();
-        });
-        ex::apply(game, &rt::Want::default());
+        // Only release the shared input slot when the queue was actually
+        // driving — clearing it unconditionally would zero `s.want` every
+        // tick and starve whatever process owns it (e.g. goto's Walk).
         if finished {
+            rt::with(|s| {
+                s.busy = false;
+                s.objective = None;
+                s.want = rt::Want::default();
+            });
+            ex::apply(game, &rt::Want::default());
             let skipped = jobs(|j| j.skipped);
             say(game, &format!("build done ({skipped} edits skipped)"));
         }

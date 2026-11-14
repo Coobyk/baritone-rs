@@ -16,6 +16,8 @@ pub enum Proc {
     None,
     /// GoalBlock-style: stand on/near this cell.
     Goto { goal: [i32; 3] },
+    /// GoalXZ-style: any standable cell in this column (y resolved en route).
+    GotoXZ { x: i32, z: i32 },
     /// GoalYLevel: any standable cell at this height.
     YLevel { y: i32 },
     /// Find and break matching blocks until none remain nearby.

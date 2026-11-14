@@ -483,11 +483,11 @@ fn surface(game: &mut Game<'_>) {
 }
 
 fn proc(game: &mut Game<'_>) {
-    let (name, at, len, obj) = rt::with(|s| {
+    let (name, at, len, obj, dbg) = rt::with(|s| {
         (
             match s.proc {
                 rt::Proc::None => "none",
-                rt::Proc::Goto { .. } => "goto",
+                rt::Proc::Goto { .. } | rt::Proc::GotoXZ { .. } => "goto",
                 rt::Proc::YLevel { .. } => "ylevel",
                 rt::Proc::Mine { .. } => "mine",
                 rt::Proc::Follow => "follow",
@@ -497,12 +497,26 @@ fn proc(game: &mut Game<'_>) {
             s.at,
             s.path.len(),
             s.objective,
+            // Live diagnostics: current move kind, wanted inputs, stuck ticks.
+            format!(
+                "move={:?} to={:?} want.f={} j={} sn={} atk={} use={} stuck={} busy={} last={:?}",
+                s.path.get(s.at).map(|m| &m.kind),
+                s.path.get(s.at).map(|m| m.pos),
+                s.want.forward,
+                s.want.jump as u8,
+                s.want.sneak as u8,
+                s.want.attack as u8,
+                s.want.right as u8,
+                s.stuck,
+                s.busy as u8,
+                s.last_pos,
+            ),
         )
     });
     let obj = obj
         .map(|o| format!("{} {} {}", o[0], o[1], o[2]))
         .unwrap_or_else(|| "-".to_owned());
-    say(game, &format!("proc: {name} — path {at}/{len}, objective {obj}"));
+    say(game, &format!("proc: {name} — path {at}/{len}, objective {obj}\nbaritone: {dbg}"));
 }
 
 fn eta(game: &mut Game<'_>) {

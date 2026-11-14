@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 pub const MAX_NODES: usize = 120_000;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
     Walk,
     Step,
@@ -73,9 +73,12 @@ impl W<'_> {
         self.game.world.shape.max_y() - 2
     }
 
-    /// The body's two cells are free to stand in (no full collision, no lava).
+    /// The body's two cells are free to stand in (no full collision, no lava)
+    /// and the head cell is not underwater — a submerged head means drowning.
     pub fn body_open(&self, p: [i32; 3]) -> bool {
-        self.open_cell(p) && self.open_cell([p[0], p[1] + 1, p[2]])
+        self.open_cell(p)
+            && self.open_cell([p[0], p[1] + 1, p[2]])
+            && !self.water([p[0], p[1] + 1, p[2]])
     }
 
     pub fn open_cell(&self, p: [i32; 3]) -> bool {
@@ -116,7 +119,7 @@ impl W<'_> {
         n.contains("ladder") || n.contains("vine") || n.contains("scaffold")
     }
 
-    fn water(&self, p: [i32; 3]) -> bool {
+    pub fn water(&self, p: [i32; 3]) -> bool {
         self.fat(p).fluid == horizon_items::blocks::Fluid::Water
     }
 
@@ -218,8 +221,9 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
     }
     // Straight drop when the ledge under us is open air. Past max_drop (up
     // to max_drop*3) only when the fall ends in water; dry falls worth
-    // >=10hp damage are skipped.
-    if !w.floor(p) {
+    // >=10hp damage are skipped. Skipped in water: no floor there means
+    // open depth, and "dropping" to the lakebed is drowning, not a move.
+    if !w.floor(p) && !w.water(p) {
         let bound = o.max_drop * 3;
         let mut wet = false;
         let mut d = 1;
@@ -304,8 +308,12 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 d += 1;
             }
         }
-        // Swim: neighbours inside water (walk in from dry land too).
-        if w.water(n) && w.open_cell([n[0], n[1] + 1, n[2]]) {
+        // Swim: neighbours on the water surface — head cell must be air-ish,
+        // else the move would park the player under water until they drown.
+        if w.water(n)
+            && w.open_cell([n[0], n[1] + 1, n[2]])
+            && !w.water([n[0], n[1] + 1, n[2]])
+        {
             out.push(Move {
                 pos: n,
                 kind: Kind::Swim,
@@ -420,6 +428,20 @@ pub fn find(
     o: &Opts,
     done: impl Fn([i32; 3], [i32; 3]) -> bool,
 ) -> Option<Vec<Move>> {
+    find_partial(w, start, goal, o, done, false)
+}
+
+/// `find`, but when the goal is unreachable (unloaded or blocked past
+/// `MAX_NODES`), returns the path to the explored cell closest to it —
+/// Baritone's walk-toward-the-goal behavior for far `GoalXZ`s.
+pub fn find_partial(
+    w: &W,
+    start: [i32; 3],
+    goal: [i32; 3],
+    o: &Opts,
+    done: impl Fn([i32; 3], [i32; 3]) -> bool,
+    partial_ok: bool,
+) -> Option<Vec<Move>> {
     if done(start, goal) {
         return Some(Vec::new());
     }
@@ -452,21 +474,32 @@ pub fn find(
     g.insert(start, 0.0);
     open.push(Frontier { f: h(start, goal), at: start });
     let mut pops = 0usize;
+    let mut best: [i32; 3] = start;
+    let mut best_h = h(start, goal);
+
+    let path_to = |end: [i32; 3], came: &HashMap<[i32; 3], ([i32; 3], Move)>| {
+        let mut out = Vec::new();
+        let mut cur = end;
+        while let Some((prev, m)) = came.get(&cur) {
+            out.push(m.clone());
+            cur = *prev;
+        }
+        out.reverse();
+        out
+    };
 
     while let Some(Frontier { at: p, .. }) = open.pop() {
         if done(p, goal) {
-            let mut out = Vec::new();
-            let mut cur = p;
-            while let Some((prev, m)) = came.get(&cur) {
-                out.push(m.clone());
-                cur = *prev;
-            }
-            out.reverse();
-            return Some(out);
+            return Some(path_to(p, &came));
+        }
+        let hp = h(p, goal);
+        if hp < best_h {
+            best_h = hp;
+            best = p;
         }
         pops += 1;
         if pops > MAX_NODES {
-            return None;
+            break;
         }
         let gp = g[&p];
         let mut ns = Vec::new();
@@ -512,6 +545,9 @@ pub fn find(
                 open.push(Frontier { f: ng + h(m.pos, goal), at: m.pos });
             }
         }
+    }
+    if partial_ok && best != start {
+        return Some(path_to(best, &came));
     }
     None
 }

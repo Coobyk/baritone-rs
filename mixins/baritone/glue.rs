@@ -50,6 +50,11 @@ fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
             }
         }
     }
+    // In water there is no standable cell: start where we float and let Swim
+    // moves carry the route to shore.
+    if w.water(feet) {
+        return Some(feet);
+    }
     None
 }
 
@@ -265,12 +270,19 @@ fn say(game: &mut Game<'_>, m: &str) {
 }
 
 fn goto(game: &mut Game<'_>, args: &[&str]) {
-    let Some(f) = game.player.as_ref().map(feet) else { return };
-    let w = pf::W { game };
+    if game.player.is_none() {
+        return;
+    }
     let ints: Vec<Option<i32>> = args.iter().map(|a| a.parse::<i32>().ok()).collect();
     let goal = match ints.as_slice() {
         [Some(x), Some(y), Some(z)] => Some([*x, *y, *z]),
-        [Some(x), Some(z)] => pf::column_top(&w, *x, *z, f[1]),
+        [Some(x), Some(z)] => {
+            // GoalXZ: don't resolve the column up-front — it may be far away
+            // and unloaded; any standable cell in it counts on arrival.
+            rt::with(|s| s.begin(rt::Proc::GotoXZ { x: *x, z: *z }));
+            say(game, &format!("going to {x} {z}"));
+            return;
+        }
         _ if args.first() == Some(&"y") => match ints.get(1).copied().flatten() {
             Some(y) => {
                 rt::with(|s| s.begin(rt::Proc::YLevel { y }));
@@ -377,6 +389,7 @@ fn goal_info(game: &mut Game<'_>) {
     let t = rt::with(|s| match s.proc {
         rt::Proc::None => "none".to_owned(),
         rt::Proc::Goto { goal } => format!("goto {} {} {}", goal[0], goal[1], goal[2]),
+        rt::Proc::GotoXZ { x, z } => format!("goto {x} {z}"),
         rt::Proc::YLevel { y } => format!("y level {y}"),
         rt::Proc::Mine { .. } => format!("mine {}", s.mine_names.join(",")),
         rt::Proc::Follow => format!("follow {}", s.follow_name),
@@ -439,13 +452,13 @@ pub(super) fn tick(game: &mut Game<'_>) {
     if !on(game) || !client(game) {
         return;
     }
-    rt::with(|s| {
-        for k in ["sprint", "allow_break", "allow_place", "allow_parkour", "max_drop", "mine_radius"] {
-            if let Some(v) = game.native_setting(rt::MOD_ID, k) {
-                rt::load(k, &v);
-            }
+    // Note: `rt::load` takes the state lock itself — never nest it inside
+    // `rt::with` (std Mutex is not reentrant; that deadlocks the tick).
+    for k in ["sprint", "allow_break", "allow_place", "allow_parkour", "max_drop", "mine_radius"] {
+        if let Some(v) = game.native_setting(rt::MOD_ID, k) {
+            rt::load(k, &v);
         }
-    });
+    }
     driver(game);
     // Feature modules drive themselves when active (they set s.busy).
     crate::game::umbx_baritone_sel::tick(game);
@@ -483,6 +496,7 @@ fn driver(game: &mut Game<'_>) {
 
     let goal = match proc {
         rt::Proc::Goto { goal } => Some(goal),
+        rt::Proc::GotoXZ { x, z } => Some([x, me[1], z]),
         rt::Proc::YLevel { y } => Some([me[0], y, me[2]]),
         rt::Proc::Mine { .. }
         | rt::Proc::Follow
@@ -510,6 +524,12 @@ fn driver(game: &mut Game<'_>) {
                             <= 18.0
                 })
             }
+            rt::Proc::GotoXZ { .. } => {
+                pf::find_partial(&w, start, goal, &o, |p, g| p[0] == g[0] && p[2] == g[2], true)
+            }
+            rt::Proc::Goto { .. } => {
+                pf::find_partial(&w, start, goal, &o, |p, g| p == g, true)
+            }
             _ => pf::find(&w, start, goal, &o, |p, g| p == g),
         };
         match path {
@@ -534,10 +554,46 @@ fn driver(game: &mut Game<'_>) {
         }
     }
 
+    // Revalidate the upcoming path against freshly loaded chunks: moves that
+    // need a standable destination were planned optimistically through air,
+    // so when reality turns out solid the route is stale and must be re-planned
+    // (Baritone re-checks its path every tick the world changes).
+    {
+        let w = pf::W { game };
+        let stale = rt::with(|s| {
+            s.path[s.at..]
+                .iter()
+                .take(10)
+                .any(|m| {
+                    match m.kind {
+                        pf::Kind::Walk
+                        | pf::Kind::Step
+                        | pf::Kind::Ladder { .. }
+                        | pf::Kind::Drop { .. }
+                        | pf::Kind::Parkour { .. } => !w.standable(m.pos),
+                        pf::Kind::Swim => !w.water(m.pos),
+                        _ => false,
+                    }
+                })
+        });
+        if stale {
+            rt::with(|s| s.path.clear());
+            return;
+        }
+    }
+
     // Execute the current move.
     let step = rt::with(|s| s.path.get(s.at).cloned());
     let prev = rt::with(|s| if s.at == 0 { me } else { s.path[s.at - 1].pos });
+    let mut vertical_move = false;
     if let Some(m) = step {
+        vertical_move = matches!(
+            m.kind,
+            pf::Kind::Ladder { .. }
+                | pf::Kind::Pillar
+                | pf::Kind::Drop { .. }
+                | pf::Kind::Downward
+        );
         match rt::with(|s| ex::drive(game, s, &m, prev)) {
             ex::Out::Done => {
                 rt::with(|s| {
@@ -545,12 +601,19 @@ fn driver(game: &mut Game<'_>) {
                     s.stuck = 0;
                 });
                 if rt::with(|s| s.at >= s.path.len()) {
-                    match proc {
-                        rt::Proc::Goto { .. } | rt::Proc::YLevel { .. } => {
-                            say(game, "arrived");
-                            rt::with(|s| s.halt());
-                        }
-                        _ => rt::with(|s| s.path.clear()),
+                    // A partial path ends short of the goal: re-plan, don't
+                    // report arrival. Only the satisfied goal says "arrived".
+                    let there = match proc {
+                        rt::Proc::Goto { goal } => me == goal,
+                        rt::Proc::GotoXZ { x, z } => me[0] == x && me[2] == z,
+                        rt::Proc::YLevel { y } => me[1] == y,
+                        _ => false,
+                    };
+                    if there {
+                        say(game, "arrived");
+                        rt::with(|s| s.halt());
+                    } else {
+                        rt::with(|s| s.path.clear());
                     }
                 }
             }
@@ -562,14 +625,22 @@ fn driver(game: &mut Game<'_>) {
         }
     }
 
-    // Stuck watchdog: hop at ~12 still ticks, re-plan once at 40, quit at 120.
-    let moved = me != rt::with(|s| s.last_pos);
+    // Stuck watchdog: progress is horizontal cell travel, or vertical travel
+    // only while a move that climbs/descends is active — hopping in place is
+    // not progress. Hop at ~10 still ticks, re-plan once at 40, quit at 120.
+    let last = rt::with(|s| s.last_pos);
+    let moved = me[0] != last[0]
+        || me[2] != last[2]
+        || (vertical_move && me[1] != last[1]);
     let stuck = rt::with(|s| {
         s.last_pos = me;
         if moved {
             s.stuck = 0;
         } else {
             s.stuck += 1;
+        }
+        if s.stuck >= 10 && s.want.forward != 0.0 {
+            s.want.jump = true;
         }
         s.stuck
     });

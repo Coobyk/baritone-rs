@@ -190,9 +190,20 @@ pub fn drive(
     let pos = player.position;
     let _on_ground = player.ground.on_ground;
     let me = feet(player);
-    // Break moves finish by clearing their cells even when we already stand
-    // on the destination (the mine's last step breaks the block itself).
-    if me == m.pos && !matches!(m.kind, pf::Kind::Break { .. }) {
+    let c = center(m.pos);
+    // A move ends once we're firmly on its cell — integer feet can hover on
+    // the cell edge (aim at the centre flips 180° each tick), so also accept
+    // standing within ~0.4 blocks of the centre at the right height.
+    let mut arrived = me == m.pos;
+    if !arrived
+        && !matches!(m.kind, pf::Kind::Break { .. })
+        && (pos.x - c[0]).powi(2) + (pos.z - c[2]).powi(2) < 0.16
+        && pos.y > c[1] - 0.6
+        && pos.y < c[1] + 1.4
+    {
+        arrived = true;
+    }
+    if arrived && !matches!(m.kind, pf::Kind::Break { .. }) {
         st.want = rt::Want::default();
         return Out::Done;
     }
@@ -205,10 +216,10 @@ pub fn drive(
         pf::Kind::Walk | pf::Kind::Drop { .. } | pf::Kind::Swim => {
             aim(game, c);
             w.forward = 1.0;
-            if m.kind == pf::Kind::Swim {
-                // Stay up: hold jump while crossing water.
-                w.jump = true;
-            }
+            // Stay up while crossing water; hop when the route climbs even
+            // within what the planner labelled a flat walk (slabs, snow,
+            // slopes whose midpoint cell read as the same y).
+            w.jump = m.kind == pf::Kind::Swim || m.pos[1] > me[1];
         }
         pf::Kind::Step => {
             aim(game, c);
