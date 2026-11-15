@@ -127,6 +127,7 @@ fn defaults() -> rt::Settings {
         allow_parkour: true,
         max_drop: 4,
         mine_radius: 32,
+        mine_scan_drops: true,
         pause: false,
     }
 }
@@ -834,7 +835,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
         "eta" => eta(game),
         // env!("CARGO_PKG_VERSION") would resolve to the *host* crate's
         // version once injected, so the port's own version is hardcoded.
-        "version" | "ver" => say(game, "baritone 0.2.0 for Horizon 9f42064"),
+        "version" | "ver" => say(game, "baritone-rs 0.3.21 for Horizon 9f42064"),
         "gc" => say(game, "gc: nothing to collect (no-op)"),
         "reloadall" => say(game, "reloadall: nothing to reload (no-op)"),
         "saveall" => {
@@ -845,6 +846,19 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
         "blacklist" => blacklist_cmd(game, &args[1..]),
         "modified" => modified(game),
         "reset" => reset(game, &args[1..]),
+        // Upstream repack resaves the CachedWorld; this port keeps no
+        // world cache, so it's a truthful no-op.
+        "repack" => say(game, "repack: no world cache — nothing to resave"),
+        "explorefilter" => {
+            // Upstream loads a JSON of explored chunks; this port keeps the
+            // visited set in memory, so `clear` is the useful form.
+            if args.get(1) == Some(&"clear") {
+                rt::with(|s| s.visited.clear());
+                say(game, "explore filter cleared");
+            } else {
+                say(game, "explorefilter: only `clear` (no chunk cache files)");
+            }
+        }
         "set" | "s" => set_cmd(game, &args[1..]),
         // pause/resume/stop/goto/mine/follow/explore/tunnel/thisway/axis/help
         // belong to the core glue — return false.

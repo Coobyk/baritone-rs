@@ -176,6 +176,60 @@ fn placeable_held(game: &crate::game::Game<'_>) -> bool {
         .any(|s| s.item.as_ref() == it.item.as_ref() && s.full_collision)
 }
 
+/// Hotbar slot holding a placeable block, preferring upstream's throwaway
+/// kinds (dirt, cobble, netherrack…) over anything valuable.
+fn place_slot(game: &crate::game::Game<'_>) -> Option<usize> {
+    const THROWAWAY: &[&str] = &[
+        "dirt",
+        "cobblestone",
+        "cobbled_deepslate",
+        "netherrack",
+        "grass_block",
+        "stone",
+        "deepslate",
+        "sand",
+        "gravel",
+        "andesite",
+        "diorite",
+        "granite",
+        "tuff",
+        "planks",
+    ];
+    let mut any: Option<usize> = None;
+    for (i, it) in game.inventory.iter().take(9).enumerate() {
+        let Some(it) = it else { continue };
+        let name = it.item.as_ref();
+        if !game
+            .res
+            .facts()
+            .states
+            .iter()
+            .any(|s| s.item.as_ref() == name && s.full_collision)
+        {
+            continue;
+        }
+        if THROWAWAY.iter().any(|t| name.contains(t)) {
+            return Some(i);
+        }
+        if any.is_none() {
+            any = Some(i);
+        }
+    }
+    any
+}
+
+/// Pillar/Bridge/Traverse all need a block in hand first: switch to one and
+/// spend a tick letting the selection land before the caller re-runs.
+fn hold_block(game: &mut crate::game::Game<'_>) -> Out {
+    match place_slot(game) {
+        Some(i) => {
+            game.selected = i;
+            Out::Working
+        }
+        None => Out::Failed,
+    }
+}
+
 /// Advance the current move; writes `st.want` for the input hook and touches
 /// `game` directly for yaw, hit, left/right and sprinting.
 pub fn drive(
@@ -295,7 +349,7 @@ pub fn drive(
         }
         pf::Kind::Traverse => {
             if !placeable_held(game) {
-                return Out::Failed;
+                return hold_block(game);
             }
             // Place the listed cells in order (approach support first, then
             // the diagonal floor), hanging each off a neighbour's face.
@@ -321,7 +375,7 @@ pub fn drive(
         }
         pf::Kind::Pillar => {
             if !placeable_held(game) {
-                return Out::Failed;
+                return hold_block(game);
             }
             // Jump and place at our feet cell (the move's `cells[0]`); bail
             // if the placement hasn't materialised in ~2s.
@@ -331,19 +385,26 @@ pub fn drive(
             }
             w.sneak = false;
             w.jump = true;
-            w.forward = 0.0;
             if !solid(game, place) {
+                // Still placing: hop in place over the cell and put the block
+                // on the support face under it.
+                w.forward = 0.0;
                 w.hit = Some(face_hit(
                     [place[0], place[1] - 1, place[2]],
                     [0, 1, 0],
                 ));
                 w.right = true;
+                aim(game, [c[0], pos.y - 1.0, c[2]]);
+            } else {
+                // Block's down: steer onto it — jumping in place beside the
+                // new floor never completes the move.
+                aim(game, c);
+                w.forward = 1.0;
             }
-            aim(game, [c[0], pos.y - 1.0, c[2]]);
         }
         pf::Kind::Bridge => {
             if !placeable_held(game) {
-                return Out::Failed;
+                return hold_block(game);
             }
             let place = m.cells[0];
             if solid(game, place) {

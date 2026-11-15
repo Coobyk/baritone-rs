@@ -55,6 +55,8 @@ pub struct Settings {
     pub max_drop: i32,
     /// Scan radius for `mine`.
     pub mine_radius: i32,
+    /// `mineScanDroppedItems`: walk to dropped items matching a mine target.
+    pub mine_scan_drops: bool,
     pub pause: bool,
 }
 
@@ -76,6 +78,13 @@ pub struct State {
     pub last_pos: [i32; 3],
     /// Re-path once after an unstick jump.
     pub replanned: bool,
+    /// Consecutive failed vertical moves: skipping a climb/descent desyncs
+    /// the path, so they force re-plans — and identical re-plans need a cap.
+    pub vert_fails: u8,
+    /// Ticks before the fresh plan is re-validated against the world — the
+    /// planner's own reads can't be instantly stale, and re-checking every
+    /// tick makes the client chunk store's flapping thrash the path.
+    pub stale_cd: u8,
     /// Ticks until the process's next decision (follow repath, mine rescan).
     pub cooldown: u32,
     /// Tunnel's step direction.
@@ -90,6 +99,9 @@ pub struct State {
     /// Objective is an excavation cell: the driver paths adjacent and
     /// appends a Break move on it, exactly like Mine does.
     pub excavate: bool,
+    /// Mine objective is a dropped item entity, not a block: walk onto it
+    /// (no appended Break move).
+    pub drop_pickup: bool,
     /// The process's current target cell (mine block, follow spot, ...).
     pub objective: Option<[i32; 3]>,
     /// A feature module's process is active: the input hook should apply
@@ -125,6 +137,8 @@ impl State {
             stuck: 0,
             last_pos: [i32::MIN; 3],
             replanned: false,
+            vert_fails: 0,
+            stale_cd: 0,
             cooldown: 0,
             busy: false,
             objective: None,
@@ -133,6 +147,7 @@ impl State {
             tunnel_queue: std::collections::VecDeque::new(),
             tunnel_col: [i32::MIN; 3],
             excavate: false,
+            drop_pickup: false,
             want: Want::default(),
             set: Settings {
                 sprint: true,
@@ -141,6 +156,7 @@ impl State {
                 allow_parkour: true,
                 max_drop: 4,
                 mine_radius: 32,
+                mine_scan_drops: true,
                 pause: false,
             },
             visited: std::collections::HashSet::new(),
@@ -162,6 +178,8 @@ impl State {
         self.at = 0;
         self.stuck = 0;
         self.replanned = false;
+        self.vert_fails = 0;
+        self.stale_cd = 0;
         self.want = Want::default();
         self.set.pause = false;
         self.eat_ticks = 0;
@@ -175,8 +193,11 @@ impl State {
         self.at = 0;
         self.stuck = 0;
         self.replanned = false;
+        self.vert_fails = 0;
+        self.stale_cd = 0;
         self.cooldown = 0;
         self.excavate = false;
+        self.drop_pickup = false;
         self.tunnel_queue.clear();
         self.tunnel_col = [i32::MIN; 3];
     }
@@ -211,6 +232,7 @@ pub fn load(name: &str, value: &str) {
             "allow_parkour" => set.allow_parkour = value == "true",
             "max_drop" => set.max_drop = value.parse().unwrap_or(4).clamp(1, 20),
             "mine_radius" => set.mine_radius = value.parse().unwrap_or(32).clamp(8, 96),
+            "mine_scan_drops" => set.mine_scan_drops = value == "true",
             _ => {}
         }
     });
@@ -226,6 +248,7 @@ pub fn to_save() -> Vec<(&'static str, String)> {
             ("allow_parkour", s.set.allow_parkour.to_string()),
             ("max_drop", s.set.max_drop.to_string()),
             ("mine_radius", s.set.mine_radius.to_string()),
+            ("mine_scan_drops", s.set.mine_scan_drops.to_string()),
         ]
     })
 }

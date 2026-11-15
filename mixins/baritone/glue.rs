@@ -36,10 +36,28 @@ fn client(game: &Game<'_>) -> bool {
 /// standable cell closest to it.
 fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
     let w = pf::W { game };
-    let feet = feet(game.player.as_ref()?);
-    if w.standable(feet) {
+    let player = game.player.as_ref()?;
+    let feet = feet(player);
+    // Wherever the player's body actually is — physics truth beats the
+    // planner's standability model (fences, slabs and fresh placements all
+    // collide differently than they read). Picking a "standable" cell the
+    // player isn't in made the first move expect them somewhere else.
+    if w.body_open(feet) || w.water(feet) {
+        if player.ground.on_ground || w.floor(feet) || w.water(feet) {
+            return Some(feet);
+        }
+        // Airborne: feet() floors the mid-jump position a block high, so the
+        // plan would start from a cell the player doesn't stand on. Start
+        // from where they'll land instead.
+        for d in 1..=5 {
+            let p = [feet[0], feet[1] - d, feet[2]];
+            if w.floor(p) && w.body_open(p) {
+                return Some(p);
+            }
+        }
         return Some(feet);
     }
+    // Buried or otherwise unsound: fall back to the nearest standable cell.
     for dy in -2..=2 {
         for dx in -1..=1 {
             for dz in -1..=1 {
@@ -292,6 +310,14 @@ fn goto(game: &mut Game<'_>, args: &[&str]) {
             (Some(x), Some(y), Some(z)) => Some([x, y, z]),
             _ => None,
         },
+        ["y", y] => {
+            if let Some(y) = c(y, 1) {
+                rt::with(|s| s.begin(rt::Proc::YLevel { y }));
+                say(game, &format!("going to y={y}"));
+                return;
+            }
+            None
+        }
         [x, z] => match (c(x, 0), c(z, 2)) {
             (Some(x), Some(z)) => {
                 // GoalXZ: don't resolve the column up-front — it may be far
@@ -302,14 +328,6 @@ fn goto(game: &mut Game<'_>, args: &[&str]) {
             }
             _ => None,
         },
-        ["y", y] => {
-            if let Some(y) = c(y, 1) {
-                rt::with(|s| s.begin(rt::Proc::YLevel { y }));
-                say(game, &format!("going to y={y}"));
-                return;
-            }
-            None
-        }
         _ => None,
     };
     match goal {
@@ -536,10 +554,19 @@ fn thisway(game: &mut Game<'_>, args: &[&str]) {
 
 fn axis(game: &mut Game<'_>) {
     let Some(f) = game.player.as_ref().map(feet) else { return };
-    // Nearest point on a coordinate axis: x=0 or z=0, keeping the other.
-    let goal = if f[0].abs() < f[2].abs() { [0, f[1], f[2]] } else { [f[0], f[1], 0] };
-    rt::with(|s| s.begin(rt::Proc::Goto { goal }));
-    say(game, &format!("to axis {} {}", goal[0], goal[2]));
+    // Upstream's `axis` is GoalAxis: the nearest point on a diagonal — the
+    // x=z or x=-z line (the Nether-highway axes).
+    let d1 = (f[0] - f[2]).abs(); // distance-ish from the x=z line
+    let d2 = (f[0] + f[2]).abs(); // from the x=-z line
+    let (x, z) = if d1 <= d2 {
+        let m = ((f[0] as i64 + f[2] as i64) / 2) as i32;
+        (m, m)
+    } else {
+        let m = ((f[0] as i64 - f[2] as i64) / 2) as i32;
+        (m, -m)
+    };
+    rt::with(|s| s.begin(rt::Proc::GotoXZ { x, z }));
+    say(game, &format!("to axis {x} {z}"));
 }
 
 fn goal_info(game: &mut Game<'_>) {
@@ -585,14 +612,17 @@ fn set(game: &mut Game<'_>, args: &[&str]) {
                 s.set.mine_radius = (v as i32).clamp(8, 96);
             }
         }
+        "drops" | "mine_scan_drops" | "minescandroppeditems" => {
+            s.set.mine_scan_drops = flip(s.set.mine_scan_drops, val);
+        }
         _ => say(game, &format!("unknown setting {key}")),
     });
     save(game);
     let text = rt::with(|s| {
         format!(
-            "sprint={} break={} place={} parkour={} drop={} radius={}",
+            "sprint={} break={} place={} parkour={} drop={} radius={} drops={}",
             s.set.sprint, s.set.allow_break, s.set.allow_place, s.set.allow_parkour,
-            s.set.max_drop, s.set.mine_radius
+            s.set.max_drop, s.set.mine_radius, s.set.mine_scan_drops
         )
     });
     say(game, &text);
@@ -611,7 +641,7 @@ pub(super) fn tick(game: &mut Game<'_>) {
     }
     // Note: `rt::load` takes the state lock itself — never nest it inside
     // `rt::with` (std Mutex is not reentrant; that deadlocks the tick).
-    for k in ["sprint", "allow_break", "allow_place", "allow_parkour", "max_drop", "mine_radius"] {
+    for k in ["sprint", "allow_break", "allow_place", "allow_parkour", "max_drop", "mine_radius", "mine_scan_drops"] {
         if let Some(v) = game.native_setting(rt::MOD_ID, k) {
             rt::load(k, &v);
         }
@@ -647,6 +677,7 @@ pub(super) fn tick(game: &mut Game<'_>) {
 fn driver(game: &mut Game<'_>) {
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
+    let grounded = player.ground.on_ground;
     let proc = rt::with(|s| s.proc);
     if proc == rt::Proc::None || rt::with(|s| s.set.pause) {
         rt::with(|s| s.want = rt::Want::default());
@@ -679,6 +710,24 @@ fn driver(game: &mut Game<'_>) {
     };
     let Some(goal) = goal else { return };
 
+    // Reaching the goal mid-path counts: upstream stops the moment the goal
+    // predicate holds, not only when a path exhausts. Mine/Follow/etc. have
+    // their own completion semantics and keep running. Grounded only: a jump
+    // apex brushing the goal's height isn't arrival.
+    let arrived = grounded
+        && match proc {
+            rt::Proc::Goto { goal } => me == goal,
+            rt::Proc::GotoXZ { x, z } => me[0] == x && me[2] == z,
+            rt::Proc::YLevel { y } => me[1] == y,
+            _ => false,
+        };
+    if arrived {
+        say(game, "arrived");
+        rt::with(|s| s.halt());
+        ex::apply(game, &rt::Want::default());
+        return;
+    }
+
     // Re-plan when the path is exhausted (or was cleared).
     if rt::with(|s| s.at >= s.path.len()) {
         let w = pf::W { game };
@@ -689,13 +738,19 @@ fn driver(game: &mut Game<'_>) {
                 pf::find(&w, start, goal, &o, |p, _| w.standable(p) && p[1] == y)
             }
             rt::Proc::Mine { .. } | rt::Proc::Follow => {
-                pf::find_partial(&w, start, goal, &o, |p, _| {
-                    w.standable(p)
-                        && ((p[0] - goal[0]).pow(2)
-                            + (p[1] - goal[1]).pow(2)
-                            + (p[2] - goal[2]).pow(2)) as f64
-                            <= 18.0
-                }, true)
+                // A dropped-item objective is a point to stand on; a block
+                // objective is reached by standing near it.
+                if rt::with(|s| s.drop_pickup) && matches!(proc, rt::Proc::Mine { .. }) {
+                    pf::find_partial(&w, start, goal, &o, |p, g| p == g, true)
+                } else {
+                    pf::find_partial(&w, start, goal, &o, |p, _| {
+                        w.standable(p)
+                            && ((p[0] - goal[0]).pow(2)
+                                + (p[1] - goal[1]).pow(2)
+                                + (p[2] - goal[2]).pow(2)) as f64
+                                <= 18.0
+                    }, true)
+                }
             }
             // A tunnel excavation cell works exactly like a mine target:
             // stand adjacent, then the appended Break takes it out.
@@ -719,11 +774,14 @@ fn driver(game: &mut Game<'_>) {
         match path {
             Some(mut path) => {
                 // Mine (and tunnel excavation cells): stand near the block,
-                // then break the block itself.
-                if matches!(proc, rt::Proc::Mine { .. })
-                    || (matches!(proc, rt::Proc::Tunnel { .. })
-                        && rt::with(|s| s.excavate))
-                {
+                // then break the block itself. Dropped-item objectives are
+                // walked onto, never broken.
+                let break_goal = match proc {
+                    rt::Proc::Mine { .. } => !rt::with(|s| s.drop_pickup),
+                    rt::Proc::Tunnel { .. } => rt::with(|s| s.excavate),
+                    _ => false,
+                };
+                if break_goal {
                     let stand = path.last().map(|m| m.pos).unwrap_or(start);
                     path.push(pf::Move {
                         pos: stand,
@@ -736,6 +794,8 @@ fn driver(game: &mut Game<'_>) {
                     s.at = 0;
                     s.stuck = 0;
                     s.replanned = false;
+                    s.stale_cd = 30;
+                    s.note.clear();
                 });
             }
             None => rt::with(|s| {
@@ -748,10 +808,17 @@ fn driver(game: &mut Game<'_>) {
     // Revalidate the upcoming path against freshly loaded chunks: moves that
     // need a standable destination were planned optimistically through air,
     // so when reality turns out solid the route is stale and must be re-planned
-    // (Baritone re-checks its path every tick the world changes).
+    // (Baritone re-checks its path every tick the world changes). A fresh
+    // plan gets a short grace period first: the client's chunk store can
+    // disagree with itself for a tick, and re-checking instantly spins a
+    // plan→flag→plan loop that never lets a move run.
     {
         let w = pf::W { game };
         let stale = rt::with(|s| {
+            if s.stale_cd > 0 {
+                s.stale_cd -= 1;
+                return false;
+            }
             let bad = s.path[s.at..].iter().take(10).find(|m| {
                 match m.kind {
                     pf::Kind::Walk
@@ -769,7 +836,10 @@ fn driver(game: &mut Game<'_>) {
             bad.is_some()
         });
         if stale {
-            rt::with(|s| s.path.clear());
+            rt::with(|s| {
+                s.path.clear();
+                s.stale_cd = 30;
+            });
             return;
         }
     }
@@ -791,6 +861,7 @@ fn driver(game: &mut Game<'_>) {
                 rt::with(|s| {
                     s.at += 1;
                     s.stuck = 0;
+                    s.vert_fails = 0;
                 });
                 if rt::with(|s| s.at >= s.path.len()) {
                     // A partial path ends short of the goal: re-plan, don't
@@ -810,15 +881,30 @@ fn driver(game: &mut Game<'_>) {
                 }
             }
             ex::Out::Failed => {
-                // Baritone treats a failed move as a route defect: skip this
-                // node and let the path re-plan rather than abandoning the job.
-                let done = rt::with(|s| {
-                    s.at += 1;
-                    s.stuck = 0;
-                    s.at >= s.path.len()
-                });
-                if done {
-                    rt::with(|s| s.path.clear());
+                // Baritone treats a failed move as a route defect. A flat
+                // node can be skipped; a vertical one can't — every node
+                // after it assumes the new elevation — so it forces a
+                // re-plan, and identical re-plans get capped.
+                if m.pos[1] != prev[1] {
+                    let fails = rt::with(|s| {
+                        s.path.clear();
+                        s.stuck = 0;
+                        s.vert_fails += 1;
+                        s.vert_fails
+                    });
+                    if fails >= 5 {
+                        say(game, "can't climb that — giving up");
+                        rt::with(|s| s.halt());
+                    }
+                } else {
+                    let done = rt::with(|s| {
+                        s.at += 1;
+                        s.stuck = 0;
+                        s.at >= s.path.len()
+                    });
+                    if done {
+                        rt::with(|s| s.path.clear());
+                    }
                 }
             }
             ex::Out::Working => {}
@@ -885,7 +971,7 @@ fn mine_step(game: &mut Game<'_>) {
     }
     rt::with(|s| s.cooldown = 5);
     // Scan nearest-first for a matching breakable block.
-    let mut best: Option<(i32, [i32; 3])> = None;
+    let mut best: Option<(i32, [i32; 3], bool)> = None;
     for dx in -radius..=radius {
         for dz in -radius..=radius {
             for dy in -8i32..=8 {
@@ -900,17 +986,50 @@ fn mine_step(game: &mut Game<'_>) {
                 }
                 if names.iter().any(|n| f.name.contains(n.as_str())) {
                     let d = dx.abs() + dy.abs() + dz.abs();
-                    if best.map_or(true, |(b, _)| d < b) {
-                        best = Some((d, p));
+                    if best.map_or(true, |(b, _, _)| d < b) {
+                        best = Some((d, p, false));
                     }
                 }
             }
         }
     }
+    // `mineScanDroppedItems`: dropped entities matching a target count as
+    // objectives too — walking over one collects it.
+    if rt::with(|s| s.set.mine_scan_drops) {
+        for it in &game.dropped {
+            let n = it.stack.item.trim_start_matches("minecraft:");
+            if !names.iter().any(|m| n.contains(m.as_str())) {
+                continue;
+            }
+            let c = [
+                it.position.x.floor() as i32 - me[0],
+                it.position.y.floor() as i32 - me[1],
+                it.position.z.floor() as i32 - me[2],
+            ];
+            if c[0].abs() > radius || c[2].abs() > radius || c[1].abs() > 16 {
+                continue;
+            }
+            let d = c[0].abs() + c[1].abs() + c[2].abs();
+            if best.map_or(true, |(b, _, _)| d < b) {
+                best = Some((
+                    d,
+                    [
+                        it.position.x.floor() as i32,
+                        it.position.y.floor() as i32,
+                        it.position.z.floor() as i32,
+                    ],
+                    true,
+                ));
+            }
+        }
+    }
     match best {
-        Some((_, t)) => {
+        Some((_, t, is_drop)) => {
             let new = rt::with(|s| s.objective != Some(t));
-            rt::with(|s| s.objective = Some(t));
+            rt::with(|s| {
+                s.objective = Some(t);
+                s.drop_pickup = is_drop;
+            });
             if new {
                 rt::with(|s| s.path.clear());
             }
