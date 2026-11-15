@@ -23,12 +23,20 @@ use crate::game::umbx_baritone as rt;
 use crate::game::Game;
 use horizon_client::text::Text;
 
-/// Path crumbs: translucent amber rim on the floor cell below each node.
-const PATH_ARGB: u32 = 0x66_FF_CC_00;
-const PATH_W: f32 = 1.0;
-/// Objective: green; red when the cell is solid (a Break target).
+/// Path: Java Baritone's `colorCurrentPath` — a solid red ribbon through
+/// the upcoming nodes (the canvas has no line primitive, so thin quads).
+const LINE_SPRITE: &str = "block/white_concrete";
+const LINE_RGBA: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
+/// Ribbon half-width in blocks — a ~4 cm line.
+const LINE_HALF: f32 = 0.03;
+/// Blocks queued to break / the mine objective: translucent green fill and
+/// wireframe rim, like Java's blocks-to-mine highlight.
+const TARGET_FILL: [u8; 4] = [0x00, 0xFF, 0x3C, 0x48];
+const TARGET_RIM: u32 = 0xFF_00_FF_3C;
+const TARGET_W: f32 = 2.0;
+/// Objective cell: translucent white fill + rim, like Java's goal box.
+const GOAL_FILL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x40];
 const GOAL_ARGB: u32 = 0xFF_22_CC_88;
-const BREAK_ARGB: u32 = 0xFF_EE_33_33;
 const GOAL_W: f32 = 2.0;
 /// Waypoints: blue rim + light name text.
 const WP_ARGB: u32 = 0xFF_55_AA_FF;
@@ -39,10 +47,14 @@ const OUTLINE: u32 = 0xB0_00_00_00;
 const SCALE: f32 = 0.045;
 /// Most path nodes drawn per frame.
 const MAX_NODES: usize = 256;
+/// Most target blocks filled per frame.
+const MAX_TARGETS: usize = 48;
 /// Most waypoints stored/drawn.
 const MAX_WPS: usize = 64;
 /// Ticks between persisted-setting re-reads.
 const SYNC_TICKS: u32 = 30;
+/// Sprite the translucent fills shade with.
+const FILL_SPRITE: &str = "block/white_concrete";
 
 struct S {
     path: bool,
@@ -179,6 +191,121 @@ pub fn waypoints(out: &mut Vec<(String, [i32; 3])>) {
 
 // ---- module contract --------------------------------------------------
 
+/// Solid blocks the process wants broken right now: every queued `Break`
+/// cell plus the current objective — Java's blocks-to-mine set, capped.
+fn targets(game: &Game<'_>) -> Vec<[i32; 3]> {
+    let (cells, objective) = rt::with(|s| {
+        (
+            s.path
+                .iter()
+                .skip(s.at)
+                .flat_map(|m| m.cells.iter().copied())
+                .collect::<Vec<_>>(),
+            s.objective,
+        )
+    });
+    let mut out: Vec<[i32; 3]> = objective.into_iter().collect();
+    for c in cells {
+        if out.len() >= MAX_TARGETS {
+            break;
+        }
+        let solid = game
+            .res
+            .facts()
+            .get(game.world.block(c[0], c[1], c[2]))
+            .full_collision;
+        if solid && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A translucent filled box on `cell` — six quads, each emitted twice
+/// (the canvas culls back faces) so the fill reads from every side.
+fn fill_box(
+    game: &Game<'_>,
+    draw: &mut crate::mod_api::NativeWorldDraw,
+    cell: [i32; 3],
+    color: [u8; 4],
+) {
+    // Grown slightly past the block faces so the fill doesn't z-fight the
+    // world mesh (Java expands the selection box the same way).
+    const E: f32 = 0.008;
+    const O: f32 = 1.0 + E * 2.0;
+    const FACES: [[[f32; 3]; 4]; 6] = [
+        [[0., 0., 0.], [O, 0., 0.], [O, 0., O], [0., 0., O]], // down
+        [[0., O, 0.], [0., O, O], [O, O, O], [O, O, 0.]], // up
+        [[O, 0., 0.], [O, O, 0.], [0., O, 0.], [0., 0., 0.]], // north
+        [[0., 0., O], [O, 0., O], [O, O, O], [0., O, O]], // south
+        [[0., 0., 0.], [0., O, 0.], [0., O, O], [0., 0., O]], // west
+        [[O, 0., O], [O, O, O], [O, O, 0.], [O, 0., 0.]], // east
+    ];
+    draw.push();
+    if draw.translate_world([
+        cell[0] as f64 - E as f64,
+        cell[1] as f64 - E as f64,
+        cell[2] as f64 - E as f64,
+    ]) {
+        for f in FACES {
+            game.native_world_quad(draw, FILL_SPRITE, f, [0., 0., 16., 16.], color);
+            let rev = [f[3], f[2], f[1], f[0]];
+            game.native_world_quad(draw, FILL_SPRITE, rev, [0., 0., 16., 16.], color);
+        }
+    }
+    draw.pop();
+}
+
+/// Java's red path line: a thin quad ribbon between consecutive node
+/// centres, flat like a GL line ~4 cm wide (no line primitive exists).
+fn line_segment(
+    game: &Game<'_>,
+    draw: &mut crate::mod_api::NativeWorldDraw,
+    a: [i32; 3],
+    b: [i32; 3],
+) {
+    let d = [
+        (b[0] - a[0]) as f32,
+        (b[1] - a[1]) as f32,
+        (b[2] - a[2]) as f32,
+    ];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if len < 0.05 {
+        return;
+    }
+    // Ribbon half-width: perpendicular to the segment in the horizontal
+    // plane, so flat paths read as a red strip on the ground.
+    let mut px = -d[2];
+    let mut pz = d[0];
+    let pl = (px * px + pz * pz).sqrt();
+    if pl < 1e-4 {
+        // Vertical segment: any horizontal perpendicular works.
+        px = 1.0;
+        pz = 0.0;
+    } else {
+        px /= pl;
+        pz /= pl;
+    }
+    let (px, pz) = (px * LINE_HALF, pz * LINE_HALF);
+    let corners: [[f32; 3]; 4] = [
+        [px, 0.0, pz],
+        [-px, 0.0, -pz],
+        [d[0] - px, d[1], d[2] - pz],
+        [d[0] + px, d[1], d[2] + pz],
+    ];
+    draw.push();
+    if draw.translate_world([
+        a[0] as f64 + 0.5,
+        a[1] as f64 + 0.5,
+        a[2] as f64 + 0.5,
+    ]) {
+        game.native_world_quad(draw, LINE_SPRITE, corners, [0., 0., 16., 16.], LINE_RGBA);
+        let rev = [corners[3], corners[2], corners[1], corners[0]];
+        game.native_world_quad(draw, LINE_SPRITE, rev, [0., 0., 16., 16.], LINE_RGBA);
+    }
+    draw.pop();
+}
+
 /// `native_visuals`: path crumbs, goal rim, waypoint rims.
 pub fn visuals(
     game: &crate::game::Game<'_>,
@@ -192,38 +319,23 @@ pub fn visuals(
     if !path_on && !goal_on && !wp_on {
         return;
     }
-    // Path: one translucent rim on the floor cell below each upcoming node
-    // (the canvas has no verified quad helper, so crumbs ride the rim list).
-    if path_on {
-        let cells = rt::with(|s| {
-            s.path
-                .iter()
-                .skip(s.at)
-                .take(MAX_NODES)
-                .map(|m| m.pos)
-                .collect::<Vec<_>>()
-        });
-        for p in cells {
+    // Blocks to break (mine objectives and queued Break cells): the green
+    // wireframe part of Java's blocks-to-mine highlight; the fill is drawn
+    // on the world canvas in `world`.
+    if goal_on {
+        for t in targets(game) {
             rims.push(NativeBlockRim {
-                pos: [p[0], p[1] - 1, p[2]],
-                argb: PATH_ARGB,
-                width: PATH_W,
+                pos: t,
+                argb: TARGET_RIM,
+                width: TARGET_W,
             });
         }
-    }
-    // Goal: the process's objective cell, else the last path node. Solid
-    // cells (mine targets) get the red "break me" rim.
-    if goal_on {
+        // Goal: the process's objective cell, else the last path node.
         let goal = rt::with(|s| s.objective.or_else(|| s.path.last().map(|m| m.pos)));
         if let Some(g) = goal {
-            let solid = game
-                .res
-                .facts()
-                .get(game.world.block(g[0], g[1], g[2]))
-                .full_collision;
             rims.push(NativeBlockRim {
                 pos: g,
-                argb: if solid { BREAK_ARGB } else { GOAL_ARGB },
+                argb: GOAL_ARGB,
                 width: GOAL_W,
             });
         }
@@ -243,13 +355,39 @@ pub fn visuals(
     let _ = lights;
 }
 
-/// `native_world_submit`: waypoint name labels, flat on the marked cell.
+/// `native_world_submit`: the red path line, translucent fills on break
+/// targets and the goal, and waypoint name labels.
 pub fn world(
     game: &crate::game::Game<'_>,
     draw: &mut crate::mod_api::NativeWorldDraw,
 ) {
     if !on(game) {
         return;
+    }
+    // Java's `renderPath`: a solid red line through the centres of the
+    // upcoming path nodes (a thin cube per segment — no line primitive).
+    if with(|s| s.path) {
+        let cells = rt::with(|s| {
+            s.path
+                .iter()
+                .skip(s.at)
+                .take(MAX_NODES)
+                .map(|m| m.pos)
+                .collect::<Vec<_>>()
+        });
+        for w in cells.windows(2) {
+            line_segment(game, draw, w[0], w[1]);
+        }
+    }
+    if with(|s| s.goal) {
+        // Green fills on blocks queued to break, white fill on the goal.
+        for t in targets(game) {
+            fill_box(game, draw, t, TARGET_FILL);
+        }
+        let goal = rt::with(|s| s.objective.or_else(|| s.path.last().map(|m| m.pos)));
+        if let Some(g) = goal {
+            fill_box(game, draw, g, GOAL_FILL);
+        }
     }
     let wps = with(|s| {
         if s.wps_on {

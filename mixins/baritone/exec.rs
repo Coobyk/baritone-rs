@@ -39,7 +39,7 @@ fn aim(game: &mut crate::game::Game<'_>, at: [f64; 3]) {
 }
 
 fn center(p: [i32; 3]) -> [f64; 3] {
-    [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5]
+    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
 }
 
 /// The face of `b` most visible from the player's eye — dominant axis from
