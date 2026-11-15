@@ -262,12 +262,12 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
 
 fn help(game: &mut Game<'_>) {
     for line in [
-        "/b goto <x> <z> | <x> <y> <z> | y <y>",
-        "/b mine <block> — dig out matching blocks",
-        "/b follow <entity> — trail a mob kind",
-        "/b explore  /b tunnel [n]  /b thisway [n]  /b axis  /b spawn",
+        "/b goto <x> <z> | <x> <y> <z> | y <y>  (~ coords ok)",
+        "/b mine [n] <block> — dig out matching blocks",
+        "/b follow <entity> | player <name> | entity <type> | entities",
+        "/b explore  /b tunnel <h> <w> [len]  /b thisway [n]  /b axis  /b spawn",
         "/b pause  /b resume  /b stop  /b path  /b click [left|right]",
-        "/b set <sprint|break|place|parkour|drop|radius> [v]",
+        "/b set <sprint|break|place|parkour|drop|radius|drops> [v]",
     ] {
         game.native_chat(&format!("baritone: {line}"));
     }

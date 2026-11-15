@@ -10,20 +10,23 @@ A [Baritone](https://github.com/cabaletta/baritone)-style pathing bot for
 | --- | --- |
 | `/b goto <x> <z>` | Walk to the standable surface at that column |
 | `/b goto <x> <y> <z>` | Walk to an exact cell |
-| `/b goto y <y>` | Reach a Y level |
-| `/b mine <block>` | Find and dig out matching blocks (e.g. `diamond_ore`, `log`, comma-separated) |
-| `/b follow <entity>` | Stay near the nearest mob of that kind (or custom name) |
+| `/b goto y <y>` | Reach a Y level; `~`/`~-N`/`~N` coords work in all forms |
+| `/b mine [n] <block>` | Find and dig out matching blocks — optional count, comma-separated kinds (`5 log,diamond_ore`); also picks up matching drops |
+| `/b follow <entity>` | Trail a mob: `player <name>`, `entity <type>`, `entities`, or a bare name |
 | `/b explore` | Wander to unvisited spots |
-| `/b tunnel [n]` | Dig and walk straight ahead (default 64) |
+| `/b tunnel <h> <w> [len]` | Excavate a corridor cross-section ahead (default 2×1) |
 | `/b thisway [n]` | Walk n blocks in the facing direction |
 | `/b axis` | Walk to the nearest coordinate axis |
+| `/b spawn` `/b click [left\|right]` | Path to world spawn / pulse a click |
 | `/b pause` `/b resume` `/b stop` `/b path` | Control the active task |
-| `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `drop`, `radius` |
+| `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `drop`, `radius`, `drops` |
+| `/b goal <x> <z>` `/b invert` | Stored goal; `invert` + `path` runs away from it |
+| `/b blacklist <block\|clear>` | Blocks the pathfinder won't break and mine skips |
 | `/b sel ...` | Selections: pos1/pos2, fill, replace, walls, shell, expand, shift, copy/cut/paste |
 | `/b build <name>` | Build a `.schematic` file; `/b build` resumes the queue |
 | `/b farm [r]` | Harvest, replant and till farmland |
 | `/b wp save\|list\|goto\|delete\|clear` | Waypoints |
-| `/b find <block>` `/b surface` `/b come` `/b invert` `/b blacklist` | More goals |
+| `/b find <block>` `/b surface` `/b come` `/b schematica` | More goals / info |
 | `/b render <path\|goal\|waypoints>` | World overlays: path crumbs, goal rim, waypoint labels |
 | `/b elytra <x> <z>` | Best-effort elytra glide (see below) |
 | `/b proc` `/b eta` `/b version` `/b modified` `/b reset` | Status/settings |
@@ -39,7 +42,13 @@ water, **break-through** (digs walls when `allow_break`), **pillar**
 
 Breaking and placing run through the game's own input: the mod points
 `forced_hit` at the target face and holds `left`/`right`, so the normal
-dig timer and use rules apply.
+dig timer and use rules apply. Mod-owned inputs are tracked and released
+the tick after they stop being requested — `/b stop` never leaves a
+button held.
+
+AutoTool picks the best hotbar tool per break using the vanilla
+`mining_speed`/`correct_tool_for_drops` rules; AutoEat selects the best
+food on the hotbar and eats when hunger drops.
 
 ## Elytra
 
