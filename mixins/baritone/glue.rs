@@ -215,10 +215,12 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
             rt::with(|s| s.set.pause = false);
             game.native_chat("baritone: resumed");
         }
-        Some("stop" | "cancel") => {
+        Some("stop" | "cancel" | "forcecancel" | "force_stop") => {
             rt::with(|s| s.halt());
             game.native_chat("baritone: stopped");
         }
+        Some("spawn") => spawn(game),
+        Some("click") => click_cmd(game, &args[1..]),
         Some("set" | "s") => {
             if !crate::game::umbx_baritone_extras::command(game, &args) {
                 set(game, &args[1..])
@@ -245,8 +247,8 @@ fn help(game: &mut Game<'_>) {
         "/b goto <x> <z> | <x> <y> <z> | y <y>",
         "/b mine <block> — dig out matching blocks",
         "/b follow <entity> — trail a mob kind",
-        "/b explore  /b tunnel [n]  /b thisway [n]  /b axis",
-        "/b pause  /b resume  /b stop  /b path",
+        "/b explore  /b tunnel [n]  /b thisway [n]  /b axis  /b spawn",
+        "/b pause  /b resume  /b stop  /b path  /b click [left|right]",
         "/b set <sprint|break|place|parkour|drop|radius> [v]",
     ] {
         game.native_chat(&format!("baritone: {line}"));
@@ -361,6 +363,112 @@ fn tunnel(game: &mut Game<'_>, args: &[&str]) {
     say(game, &format!("tunnelling {n} blocks"));
 }
 
+/// `spawn`: path to the world spawn (upstream's `spawn` — the level's spawn
+/// point, with a bed/respawn point as fallback when world_spawn is unknown).
+fn spawn(game: &mut Game<'_>) {
+    let goal = game
+        .spawn
+        .map(|s| {
+            [
+                s.x.floor() as i32,
+                s.y.floor() as i32,
+                s.z.floor() as i32,
+            ]
+        })
+        .or(game.level.world_spawn);
+    match goal {
+        Some(g) => {
+            rt::with(|s| s.begin(rt::Proc::GotoXZ { x: g[0], z: g[2] }));
+            say(game, &format!("going to spawn {} {}", g[0], g[2]));
+        }
+        None => say(game, "baritone: no spawn point known"),
+    }
+}
+
+/// `click [left|right]`: pulse a mouse button for two ticks (upstream
+/// `click` presses both at the screen center; an arg picks just one).
+fn click_cmd(game: &mut Game<'_>, args: &[&str]) {
+    let (l, r) = match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("left") => (2, 0),
+        Some("right") => (0, 2),
+        _ => (2, 2),
+    };
+    rt::with(|s| {
+        s.click_left = l;
+        s.click_right = r;
+    });
+    say(game, "clicked");
+}
+
+/// AutoEat: during a process, hold `right` on the best hotbar food once
+/// hunger leaves room for it (Baritone eats when `food <= 20 - nutrition`).
+/// Overlays `want.right` on free ticks rather than pausing the path — a
+/// break or place in flight is never interrupted.
+fn auto_eat(game: &mut Game<'_>) {
+    let proc_active = rt::with(|s| s.proc != rt::Proc::None && !s.set.pause);
+    let Some(food) = game.player.as_ref().map(|p| p.health.food.food) else {
+        return;
+    };
+    let eating = rt::with(|s| s.eat_ticks > 0);
+    if !proc_active {
+        rt::with(|s| s.eat_ticks = 0);
+        return;
+    }
+    if eating {
+        // A bite finishes when hunger rises, the slot stops being food, or
+        // a 40-tick fuse blows (eat takes 32 ticks in vanilla).
+        let held_food = game
+            .held()
+            .and_then(|it| game.res.items().get(&it.item))
+            .and_then(|i| i.food)
+            .is_some();
+        let done = rt::with(|s| {
+            let up = s.eat_ticks >= 40;
+            s.eat_ticks += 1;
+            food > s.eat_food || !held_food || up
+        });
+        if done {
+            rt::with(|s| s.eat_ticks = 0);
+        } else {
+            rt::with(|s| {
+                s.want.right = true;
+            });
+            // `apply` already ran this tick — press the button directly.
+            game.right = true;
+        }
+        return;
+    }
+    // Not eating: only on a free tick (no attack/place in flight), and only
+    // when the best food wouldn't overshoot the hunger bar.
+    if rt::with(|s| s.want.attack || s.want.right) {
+        return;
+    }
+    let mut best: Option<(u32, usize)> = None;
+    for (i, it) in game.inventory.iter().take(9).enumerate() {
+        let Some(it) = it else { continue };
+        let Some(info) = game.res.items().get(&it.item) else {
+            continue;
+        };
+        let Some((nutrition, _)) = info.food else {
+            continue;
+        };
+        if info.can_always_eat || food + nutrition as i32 <= 20 {
+            if best.map_or(true, |(n, _)| nutrition > n) {
+                best = Some((nutrition, i));
+            }
+        }
+    }
+    if let Some((_, slot)) = best {
+        game.selected = slot;
+        rt::with(|s| {
+            s.want.right = true;
+            s.eat_ticks = 1;
+            s.eat_food = food;
+        });
+        game.right = true;
+    }
+}
+
 fn thisway(game: &mut Game<'_>, args: &[&str]) {
     let n = args.first().and_then(|a| a.parse::<i32>().ok()).unwrap_or(16).clamp(1, 256);
     let Some(p) = game.player.as_ref() else { return };
@@ -460,6 +568,22 @@ pub(super) fn tick(game: &mut Game<'_>) {
         }
     }
     driver(game);
+    auto_eat(game);
+    // `click` pulses overlay whatever the driver applied this tick.
+    let (cl, cr) = rt::with(|s| {
+        let l = s.click_left > 0;
+        let r = s.click_right > 0;
+        s.click_left = s.click_left.saturating_sub(1);
+        s.click_right = s.click_right.saturating_sub(1);
+        (l, r)
+    });
+    if cl {
+        game.left = true;
+        game.swing_arm();
+    }
+    if cr {
+        game.right = true;
+    }
     // Feature modules drive themselves when active (they set s.busy).
     crate::game::umbx_baritone_sel::tick(game);
     crate::game::umbx_baritone_build::tick(game);

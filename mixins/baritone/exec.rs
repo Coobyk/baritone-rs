@@ -130,59 +130,39 @@ fn tool_for(game: &mut crate::game::Game<'_>, b: [i32; 3]) {
         *g = Some(b);
     }
     let st = game.world.block(b[0], b[1], b[2]);
-    let name = game.res.facts().get(st).name.to_string();
-    if let Some(slot) = best_tool(game, &name) {
+    let facts = game.res.facts().get(st);
+    let name = facts.name.to_string();
+    let requires = facts.requires_tool;
+    if let Some(slot) = best_tool(game, &name, requires) {
         game.selected = slot;
     }
 }
 
-/// Best hotbar slot for `block`, when it scores above the held stack.
-fn best_tool(game: &crate::game::Game<'_>, block: &str) -> Option<usize> {
-    let mut best: Option<(i32, usize)> = None;
+/// Best hotbar slot for `block` by vanilla's own mining rules
+/// (`Items::mining_speed` + `has_correct_tool_for_drops`), when it beats the
+/// held stack. Upstream AutoTool: a tool that can't harvest is nearly
+/// worthless on `requires_tool` blocks, so it scores a hundredth.
+fn best_tool(game: &crate::game::Game<'_>, block: &str, requires: bool) -> Option<usize> {
+    let items = game.res.items();
+    let score = |held: Option<&horizon_items::items::ItemStack>| -> f32 {
+        let speed = items.mining_speed(held, block);
+        if items.has_correct_tool_for_drops(held, requires, block) {
+            speed
+        } else {
+            speed / 100.0
+        }
+    };
+    let held = score(game.held());
+    let mut best: Option<(f32, usize)> = None;
     for (i, it) in game.inventory.iter().take(9).enumerate() {
-        let Some(it) = it else { continue };
-        let s = tool_score(&it.item, block);
+        let s = score(it.as_ref());
         if best.map_or(true, |(b, _)| s > b) {
             best = Some((s, i));
         }
     }
-    let held = game.held().map_or(0, |it| tool_score(&it.item, block));
     match best {
-        Some((s, i)) if s > held && s > 0 => Some(i),
+        Some((s, i)) if s > held => Some(i),
         _ => None,
-    }
-}
-
-/// Tool quality vs a block name: 10+tier when the tool kind fits the
-/// material, bare tier for an off-kind tool, 0 for non-tools.
-fn tool_score(item: &str, block: &str) -> i32 {
-    let pick = item.contains("pickaxe");
-    let axe = !pick && item.contains("axe");
-    let shovel = item.contains("shovel");
-    let shears = item.contains("shears");
-    let sword = item.contains("sword");
-    if !(pick || axe || shovel || shears || sword) {
-        return 0;
-    }
-    let bh = |keys: &[&str]| keys.iter().any(|k| block.contains(k));
-    let kind = (pick
-        && bh(&[
-            "ore", "stone", "deepslate", "sandstone", "netherrack", "iron", "gold",
-            "diamond", "emerald", "lapis", "redstone", "copper", "coal", "obsidian",
-            "anvil", "furnace", "brick",
-        ]))
-        || (axe && bh(&["log", "wood", "stem", "planks"]))
-        || (shovel && bh(&["dirt", "sand", "gravel", "clay", "snow", "mud", "soul"]))
-        || (shears && bh(&["leaves", "wool", "vine"]))
-        || (sword && bh(&["web", "bamboo"]));
-    let tier = ["netherite", "diamond", "iron", "stone", "golden", "wooden"]
-        .iter()
-        .position(|t| item.contains(t))
-        .map_or(0, |i| (6 - i) as i32);
-    if kind {
-        10 + tier
-    } else {
-        tier
     }
 }
 

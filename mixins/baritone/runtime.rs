@@ -90,6 +90,13 @@ pub struct State {
     pub rng: u64,
     /// Diagnostic: why the last plan/stale-check did what it did.
     pub note: String,
+    /// Ticks to keep holding attack / use for a `click` pulse.
+    pub click_left: u8,
+    pub click_right: u8,
+    /// Eating lockout: while >0, auto_eat keeps holding use on the food slot.
+    pub eat_ticks: u8,
+    /// Hunger level when the current bite started (completion = it rose).
+    pub eat_food: i32,
 }
 
 impl State {
@@ -120,6 +127,10 @@ impl State {
             visited: std::collections::HashSet::new(),
             rng: 0x9e3779b97f4a7c15,
             note: String::new(),
+            click_left: 0,
+            click_right: 0,
+            eat_ticks: 0,
+            eat_food: 20,
         }
     }
 
@@ -134,6 +145,7 @@ impl State {
         self.replanned = false;
         self.want = Want::default();
         self.set.pause = false;
+        self.eat_ticks = 0;
     }
 
     /// Begin `proc`, dropping any in-flight path so the next tick re-plans.
