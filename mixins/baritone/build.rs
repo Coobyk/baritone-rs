@@ -627,7 +627,18 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
                 });
                 if empty {
                     // Path-goal reached but just outside arm's reach — try
-                    // anyway (`forced_hit` bypasses the crosshair check).
+                    // anyway (`forced_hit` bypasses the crosshair check),
+                    // but bound the retries: a cell the click can't land
+                    // on would hold `use` forever.
+                    let drop_it = jobs(|j| {
+                        j.misses += 1;
+                        j.misses >= 3
+                    });
+                    if drop_it {
+                        drop_edit(i);
+                        say(game, "can't reach an edit — dropped it");
+                        return;
+                    }
                     if let Some(eye) = game.player.as_ref().map(|p| {
                         [p.position.x, p.position.y + 1.62, p.position.z]
                     }) {
