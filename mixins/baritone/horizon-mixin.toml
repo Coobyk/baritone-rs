@@ -110,6 +110,31 @@ bindings = [
 ]
 
 [[injection]]
+id = "register_commands"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_register_commands"
+helper = "hooks/register_commands.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "commands", ty = "&mut Vec<crate::mod_api::NativeCommand>", value = "&mut *commands" },
+]
+
+[[injection]]
+id = "tab_complete"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_tab_complete_v2"
+helper = "hooks/tab_complete.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "label", ty = "&str", value = "label" },
+  { name = "arguments", ty = "&[String]", value = "arguments" },
+  { name = "range", ty = "[usize; 2]", value = "range" },
+  { name = "suggestions", ty = "&mut Vec<crate::mod_api::Suggestion>", value = "&mut *suggestions" },
+]
+
+[[injection]]
 id = "list"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::Game<'_>::native_mods"

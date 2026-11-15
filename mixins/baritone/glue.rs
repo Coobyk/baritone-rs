@@ -137,6 +137,288 @@ pub(super) fn commands(game: &Game<'_>, commands: &mut Vec<&'static str>) {
     }
 }
 
+/// `/b`/`baritone` usage strings pushed at `native_register_commands`: the
+/// integrated server merges them into the tree the chat box completes and
+/// colours, so subcommands and argument kinds show like vanilla's instead
+/// of a bare `[args]` (`Dispatcher::with_mod_commands` gives a command only
+/// a greedy `args`). Execution still happens client-side —
+/// `client_mod_command` intercepts the line before the server sees it.
+/// `word?`/`text?` argument kinds mark nodes whose completions the client
+/// asks the server for; `tab_complete` answers those.
+const USAGES: &[&str] = &[
+    "",
+    " help",
+    " goto <x:integer> <z:integer>",
+    " goto <x:integer> <y:integer> <z:integer>",
+    " goto y <y:integer>",
+    " g <x:integer> <z:integer>",
+    " mine <blocks:text?>",
+    " mine <count:integer> <blocks:text?>",
+    " m <blocks:text?>",
+    " follow",
+    " follow player <name:player_name>",
+    " follow entity <type:word?>",
+    " follow entities",
+    " follow <target:word>",
+    " f <target:word>",
+    " explore [filter:text?]",
+    " e [filter:text?]",
+    " tunnel [height:integer] [width:integer] [length:integer]",
+    " t [height:integer] [width:integer] [length:integer]",
+    " thisway [blocks:integer]",
+    " axis",
+    " spawn",
+    " goal",
+    " goal <x:integer> <z:integer>",
+    " goal <x:integer> <y:integer> <z:integer>",
+    " path",
+    " invert",
+    " pause",
+    " resume",
+    " stop",
+    " cancel",
+    " forcecancel",
+    " click",
+    " click <button:word?>",
+    " set <key:word?> [value:word?]",
+    " s <key:word?> [value:word?]",
+    " sprint [state:boolean]",
+    " wp",
+    " wp list",
+    " wp save <name:word>",
+    " wp goto <name:word?>",
+    " wp delete <name:word?>",
+    " wp clear",
+    " modified [setting:word?]",
+    " reset <setting:word?>",
+    " saveall",
+    " reloadall",
+    " repack",
+    " gc",
+    " blacklist [block:text?]",
+    " avoid [block:text?]",
+    " blockstoavoid [block:text?]",
+    " explorefilter",
+    " explorefilter <action:word?>",
+    " find <block:text?>",
+    " surface",
+    " top",
+    " come",
+    " proc",
+    " eta",
+    " version",
+    " sel",
+    " sel pos1",
+    " sel pos2",
+    " sel clear",
+    " sel area",
+    " sel expand <dir:word?> [n:integer]",
+    " sel shift <dir:word?> [n:integer]",
+    " sel copy",
+    " sel cut",
+    " sel paste",
+    " sel fill [block:text?]",
+    " sel replace [from:word?] [to:word?]",
+    " sel walls [block:text?]",
+    " sel shell [block:text?]",
+    " build",
+    " build <name:word?> [x:integer] [y:integer] [z:integer]",
+    " schematica",
+    " farm",
+    " farm off",
+    " farm <radius:integer>",
+    " render",
+    " render <target:word?> [state:boolean]",
+    " elytra",
+    " elytra <x:integer> <z:integer>",
+];
+
+/// `native_register_commands`: the `/b` grammar as usages.
+pub(super) fn register_commands(
+    game: &mut Game<'_>,
+    commands: &mut Vec<crate::mod_api::NativeCommand>,
+) {
+    if !on(game) {
+        return;
+    }
+    for usage in USAGES {
+        for root in ["b", "baritone"] {
+            commands.push(crate::mod_api::NativeCommand::new(&format!(
+                "{root}{usage}"
+            )));
+        }
+    }
+}
+
+/// Block names `/b mine`, `find`, `explore`, `blacklist`, `avoid` and
+/// `sel fill` complete. The block registry isn't enumerable through the
+/// mod surface, so this is the common set — every name the commands accept
+/// still parses whether it's listed or not.
+const BLOCK_NAMES: &[&str] = &[
+    "air", "stone", "granite", "diorite", "andesite", "deepslate", "tuff", "dirt",
+    "grass_block", "dirt_path", "farmland", "sand", "red_sand", "gravel", "clay", "mud",
+    "cobblestone", "mossy_cobblestone", "stone_bricks", "bricks", "bedrock", "obsidian",
+    "coal_ore", "iron_ore", "copper_ore", "gold_ore", "lapis_ore", "redstone_ore",
+    "diamond_ore", "emerald_ore",
+    "deepslate_coal_ore", "deepslate_iron_ore", "deepslate_copper_ore",
+    "deepslate_gold_ore", "deepslate_lapis_ore", "deepslate_redstone_ore",
+    "deepslate_diamond_ore", "deepslate_emerald_ore",
+    "nether_gold_ore", "nether_quartz_ore", "ancient_debris",
+    "oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log",
+    "dark_oak_log", "mangrove_log", "cherry_log", "pale_oak_log",
+    "crimson_stem", "warped_stem",
+    "oak_leaves", "spruce_leaves", "birch_leaves", "jungle_leaves",
+    "acacia_leaves", "dark_oak_leaves",
+    "water", "lava", "ice", "snow", "snow_block", "powder_snow",
+    "glass", "cobweb", "torch", "ladder", "vine", "scaffolding",
+    "wheat", "carrots", "potatoes", "beetroots", "sugar_cane", "cactus",
+    "pumpkin", "melon", "sweet_berry_bush",
+    "rail", "powered_rail", "detector_rail", "activator_rail",
+    "netherrack", "soul_sand", "soul_soil", "basalt", "blackstone",
+    "nether_bricks", "end_stone",
+    "short_grass", "tall_grass", "fern", "dead_bush", "leaf_litter",
+    "chest", "crafting_table", "furnace", "barrel", "spawner",
+    "nether_portal", "end_portal_frame",
+];
+
+/// Entity names `/b follow entity` completes.
+const ENTITY_NAMES: &[&str] = &[
+    "player", "zombie", "skeleton", "creeper", "spider", "cave_spider", "enderman",
+    "witch", "slime", "cow", "pig", "sheep", "chicken", "horse", "villager",
+    "iron_golem", "wolf", "axolotl", "item",
+];
+
+/// `sel` directions (`expand`/`shift` take these).
+const SEL_DIRS: &[&str] = &[
+    "up", "down", "north", "south", "east", "west", "u", "d", "n", "s", "e", "w",
+];
+
+/// Schematic names in `schematics/` under the dirs `build` loads from.
+fn schematic_names() -> Vec<String> {
+    let roots = [
+        std::env::current_dir().ok(),
+        std::env::var_os("HORIZON_HOME").map(std::path::PathBuf::from),
+        std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".local/share/horizon")),
+    ];
+    let mut out = Vec::new();
+    for root in roots.into_iter().flatten() {
+        let Ok(dir) = std::fs::read_dir(root.join("schematics")) else {
+            continue;
+        };
+        for e in dir.flatten() {
+            let Some(name) = e.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let base = name
+                .strip_suffix(".schematic")
+                .or_else(|| name.strip_suffix(".schem"))
+                .unwrap_or(&name)
+                .to_owned();
+            if !out.contains(&base) {
+                out.push(base);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `native_tab_complete_v2`: answers for the `word?`/`text?` arguments in
+/// `USAGES` — settings keys, waypoint names, block/entity names, schematic
+/// files — matched on the subcommand, not just the word being typed.
+pub(super) fn tab_complete(
+    game: &mut Game<'_>,
+    _player: u128,
+    _name: &str,
+    label: &str,
+    arguments: &[String],
+    range: [usize; 2],
+    suggestions: &mut Vec<crate::mod_api::Suggestion>,
+) {
+    if !label.eq_ignore_ascii_case("b") && !label.eq_ignore_ascii_case("baritone") {
+        return;
+    }
+    let Some((last, before)) = arguments.split_last() else {
+        return;
+    };
+    // The word being typed, with the words before it. `mine 5 log,di`
+    // completes the part after the last comma, keeping `log,`.
+    let typed = last.rsplit(',').next().unwrap_or_default();
+    let prefix = typed.to_ascii_lowercase();
+    let stem = &last[..last.len() - typed.len()];
+    let head = before
+        .first()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    // Which argument is typed: the index in `arguments` it sits at.
+    let pos = before.len();
+    let mut push = |cands: Vec<String>| {
+        for c in cands {
+            if c.to_ascii_lowercase().starts_with(&prefix) {
+                suggestions.push(crate::mod_api::Suggestion {
+                    range: (range[0], range[1]),
+                    text: format!("{stem}{c}"),
+                    tooltip: None,
+                    int_value: None,
+                });
+            }
+        }
+    };
+    let owned = |cands: &[&str]| cands.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>();
+    let sub = before.get(1).map(|s| s.to_ascii_lowercase());
+    match head.as_str() {
+        "set" | "s" => match pos {
+            1 => push(crate::game::umbx_baritone_extras::setting_names()),
+            2 => push(owned(&["on", "off", "true", "false"])),
+            _ => {}
+        },
+        "reset" | "modified" if pos == 1 => {
+            push(crate::game::umbx_baritone_extras::setting_names())
+        }
+        "wp" | "waypoint" | "waypoints"
+            if pos == 2
+                && matches!(
+                    sub.as_deref(),
+                    Some("goto" | "delete" | "del" | "remove")
+                ) =>
+        {
+            push(crate::game::umbx_baritone_extras::wp_names(game))
+        }
+        "mine" | "m" | "find" | "explore" | "e" if pos >= 1 => push(owned(BLOCK_NAMES)),
+        "blacklist" | "avoid" | "blockstoavoid" if pos >= 1 => {
+            let mut c = owned(BLOCK_NAMES);
+            c.push("clear".to_owned());
+            push(c);
+        }
+        "sel" | "selection" => {
+            if matches!(sub.as_deref(), Some("expand" | "shift" | "e" | "ex" | "s" | "sh"))
+                && pos == 2
+            {
+                push(owned(SEL_DIRS));
+            } else if matches!(
+                sub.as_deref(),
+                Some("fill" | "f" | "replace" | "r" | "walls" | "w" | "shell")
+            ) && pos >= 2
+            {
+                push(owned(BLOCK_NAMES));
+            }
+        }
+        "build" if pos == 1 => push(schematic_names()),
+        "render" | "draw" => match pos {
+            1 => push(owned(&["path", "goal", "waypoints"])),
+            2 => push(owned(&["on", "off", "true", "false"])),
+            _ => {}
+        },
+        "explorefilter" if pos == 1 => push(owned(&["save", "clear", "count"])),
+        "follow" | "f" if pos == 2 && sub.as_deref() == Some("entity") => {
+            push(owned(ENTITY_NAMES))
+        }
+        "click" if pos == 1 => push(owned(&["left", "right"])),
+        _ => {}
+    }
+}
+
 /// `native_settings`: buttons mirroring the toggles.
 pub(super) fn page(game: &Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
     if mod_id != rt::ID {

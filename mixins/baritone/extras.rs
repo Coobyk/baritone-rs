@@ -276,6 +276,75 @@ pub fn avoided(name: &str) -> bool {
     !n.is_empty() && with(|s| s.avoid.iter().any(|b| n.contains(b.as_str())))
 }
 
+/// Waypoint names for chat completion (`glue::tab_complete`).
+pub fn wp_names(game: &Game<'_>) -> Vec<String> {
+    load_once(game);
+    with(|s| s.wps.keys().cloned().collect())
+}
+
+/// Every `/b set` key — real settings, their aliases and the cfg-backed
+/// ones — for chat completion and `/b reset`/`/b modified`.
+pub fn setting_names() -> Vec<String> {
+    let mut out: Vec<String> = REAL_SETTING_NAMES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    out.extend(CFG_DEFAULTS.iter().map(|(n, _)| (*n).to_owned()));
+    out
+}
+
+/// Canonical (first the names `/b set` prints, then accepted aliases)
+/// real-setting names for completion.
+const REAL_SETTING_NAMES: &[&str] = &[
+    "allowSprint",
+    "allowBreak",
+    "allowPlace",
+    "allowParkour",
+    "allowParkourPlace",
+    "maxFallHeight",
+    "maxFallHeightNoWater",
+    "mineRadius",
+    "mineScanDroppedItems",
+    "onlyExposedOres",
+    "followRadius",
+    "legitMine",
+    "assumeWalkOnWater",
+    "assumeWalkOnLava",
+    "mobAvoidanceRadius",
+    "mobAvoidanceCoefficient",
+    "allowDownward",
+    "allowVines",
+    "allowDiagonalAscend",
+    "allowDiagonalDescend",
+    "assumeStep",
+    "sprintInWater",
+    "toolSelect",
+    "allowWalkOnBottomSlab",
+    "sprint",
+    "break",
+    "place",
+    "parkour",
+    "parkourPlace",
+    "drop",
+    "radius",
+    "drops",
+    "exposed",
+    "followR",
+    "legit",
+    "water",
+    "lava",
+    "mobR",
+    "mobC",
+    "down",
+    "vines",
+    "dAsc",
+    "dDesc",
+    "step",
+    "sprintW",
+    "tool",
+    "slab",
+];
+
 /// A stored setting's value by Baritone name (`buildIgnoreBlocks` etc.).
 pub fn cfg_get(name: &str) -> Option<String> {
     with(|s| s.cfg.get(name).cloned())

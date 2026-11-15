@@ -6,6 +6,14 @@ A [Baritone](https://github.com/cabaletta/baritone)-style pathing bot for
 
 ## Commands — `/b` or `/baritone`
 
+Both aliases register a real Brigadier grammar with the game, so chat shows
+subcommand usage and inline tab-completion instead of a raw `[<args>]` hint.
+Completions are context-aware: setting names and `on`/`off` values after
+`/b set`, waypoint names after `/b wp goto`, block names after `/b mine`
+(comma-separated lists complete the part after the last comma), schematic
+files after `/b build`, directions after `/b sel expand`, entity types after
+`/b follow entity`, and more.
+
 | Command | What it does |
 | --- | --- |
 | `/b goto <x> <z>` | Walk to the standable surface at that column |
