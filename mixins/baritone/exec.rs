@@ -437,15 +437,27 @@ pub fn drive(
 pub fn apply(game: &mut crate::game::Game<'_>, w: &rt::Want) {
     let w = *w;
     game.forced_hit = w.hit;
-    if w.attack || w.right {
-        if w.attack {
-            game.left = true;
-        }
-        if w.right {
-            game.right = true;
-            game.swing_arm();
-        }
+    // `left`/`right` latch: the engine only rewrites them on input events, so
+    // a flag we set and never clear keeps clicking forever after the process
+    // stops. Release only the ones we ourselves set.
+    static HELD: Mutex<(bool, bool)> = Mutex::new((false, false));
+    let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    if w.attack {
+        game.left = true;
+        held.0 = true;
+    } else if held.0 {
+        game.left = false;
+        held.0 = false;
     }
+    if w.right {
+        game.right = true;
+        held.1 = true;
+        game.swing_arm();
+    } else if held.1 {
+        game.right = false;
+        held.1 = false;
+    }
+    drop(held);
     if let Some(p) = game.player.as_mut() {
         p.sprinting = w.sprint && w.forward > 0.0;
     }

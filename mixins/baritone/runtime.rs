@@ -119,6 +119,11 @@ pub struct State {
     /// Ticks to keep holding attack / use for a `click` pulse.
     pub click_left: u8,
     pub click_right: u8,
+    /// Direct `game.left`/`game.right` writes we own (click pulses, eating):
+    /// the engine only rewrites them on input events, so we must release
+    /// them ourselves when done.
+    pub held_l: bool,
+    pub held_r: bool,
     /// Eating lockout: while >0, auto_eat keeps holding use on the food slot.
     pub eat_ticks: u8,
     /// Hunger level when the current bite started (completion = it rose).
@@ -164,6 +169,8 @@ impl State {
             note: String::new(),
             click_left: 0,
             click_right: 0,
+            held_l: false,
+            held_r: false,
             eat_ticks: 0,
             eat_food: 20,
         }

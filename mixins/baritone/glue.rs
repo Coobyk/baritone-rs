@@ -500,8 +500,6 @@ fn auto_eat(game: &mut Game<'_>) {
             rt::with(|s| {
                 s.want.right = true;
             });
-            // `apply` already ran this tick — press the button directly.
-            game.right = true;
         }
         return;
     }
@@ -532,7 +530,6 @@ fn auto_eat(game: &mut Game<'_>) {
             s.eat_ticks = 1;
             s.eat_food = food;
         });
-        game.right = true;
     }
 }
 
@@ -648,7 +645,10 @@ pub(super) fn tick(game: &mut Game<'_>) {
     }
     driver(game);
     auto_eat(game);
-    // `click` pulses overlay whatever the driver applied this tick.
+    // `click` pulses and the auto-eat hold overlay whatever the driver
+    // applied this tick. `game.left`/`game.right` latch in the engine — we
+    // release them on the tick after we stop holding (a latched `right`
+    // blocks `continue_attack` forever via `using.is_some()`).
     let (cl, cr) = rt::with(|s| {
         let l = s.click_left > 0;
         let r = s.click_right > 0;
@@ -656,13 +656,24 @@ pub(super) fn tick(game: &mut Game<'_>) {
         s.click_right = s.click_right.saturating_sub(1);
         (l, r)
     });
-    if cl {
-        game.left = true;
-        game.swing_arm();
-    }
-    if cr {
-        game.right = true;
-    }
+    let eating = rt::with(|s| s.eat_ticks > 0);
+    rt::with(|s| {
+        if cl {
+            s.held_l = true;
+            game.left = true;
+            game.swing_arm();
+        } else if s.held_l {
+            s.held_l = false;
+            game.left = false;
+        }
+        if cr || eating {
+            s.held_r = true;
+            game.right = true;
+        } else if s.held_r {
+            s.held_r = false;
+            game.right = false;
+        }
+    });
     // Feature modules drive themselves when active (they set s.busy).
     crate::game::umbx_baritone_sel::tick(game);
     crate::game::umbx_baritone_build::tick(game);
