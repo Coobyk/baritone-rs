@@ -500,7 +500,7 @@ fn proc(game: &mut Game<'_>) {
             s.objective,
             // Live diagnostics: current move kind, wanted inputs, stuck ticks.
             format!(
-                "move={:?} to={:?} want.f={} j={} sn={} atk={} use={} stuck={} busy={} last={:?} {} g.l={} g.r={} hit={} mining={:?}",
+                "move={:?} to={:?} want.f={} j={} sn={} atk={} use={} stuck={} busy={} {} {} g.l={} g.r={} hit={} mining={:?}",
                 s.path.get(s.at).map(|m| &m.kind),
                 s.path.get(s.at).map(|m| m.pos),
                 s.want.forward,
@@ -510,7 +510,11 @@ fn proc(game: &mut Game<'_>) {
                 s.want.right as u8,
                 s.stuck,
                 s.busy as u8,
-                s.last_pos,
+                if s.last_pos[0] == i32::MIN {
+                    String::new()
+                } else {
+                    format!("last={:?}", s.last_pos)
+                },
                 s.note,
                 game.left as u8,
                 game.right as u8,

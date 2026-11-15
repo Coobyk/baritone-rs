@@ -106,7 +106,9 @@ impl W<'_> {
     /// `p` can be broken through by the player.
     pub fn breakable(&self, p: [i32; 3]) -> bool {
         let f = self.fat(p);
-        f.hardness >= 0.0 && f.fluid != horizon_items::blocks::Fluid::Lava
+        f.hardness >= 0.0
+            && f.fluid != horizon_items::blocks::Fluid::Lava
+            && !crate::game::umbx_baritone_extras::blacklisted(f.name.as_ref())
     }
 
     fn break_cost(&self, p: [i32; 3]) -> f64 {

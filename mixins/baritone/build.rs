@@ -447,6 +447,24 @@ fn execute(game: &mut Game<'_>, i: usize, pos: [i32; 3], eye: [f64; 3]) {
         attack(game, pos);
         return;
     }
+    // Vanilla refuses to place a block where it would intersect the
+    // player's box; holding `use` there spins forever (e.g. filling a
+    // region you stand in). Drop the edit instead of stalling the queue.
+    if let Some(p) = game.player.as_ref() {
+        let (px, py, pz) = (p.position.x, p.position.y, p.position.z);
+        let (x0, y0, z0) = (pos[0] as f64, pos[1] as f64, pos[2] as f64);
+        if px + 0.3 > x0
+            && px - 0.3 < x0 + 1.0
+            && py + 1.8 > y0
+            && py < y0 + 1.0
+            && pz + 0.3 > z0
+            && pz - 0.3 < z0 + 1.0
+        {
+            drop_edit(i);
+            say(game, "target cell intersects the player — edit dropped");
+            return;
+        }
+    }
     let Some(sup) = support(game, eye, pos) else {
         drop_edit(i);
         say(game, "no support block to place on — edit dropped");

@@ -344,24 +344,36 @@ fn goto(game: &mut Game<'_>, args: &[&str]) {
 
 fn mine(game: &mut Game<'_>, args: &[&str]) {
     if args.is_empty() {
-        say(game, "/b mine <block> — e.g. /b mine diamond_ore,log");
+        say(game, "/b mine [n] <block> — e.g. /b mine 5 log,diamond_ore");
         return;
     }
-    let names: Vec<String> = args
+    // Upstream `mine <count> <block>`: a leading integer is the quantity.
+    let (want, rest) = match args[0].parse::<u32>() {
+        Ok(n) => (n, &args[1..]),
+        Err(_) => (0, args),
+    };
+    let names: Vec<String> = rest
         .iter()
         .flat_map(|a| a.split(','))
         .map(|n| n.trim_start_matches("minecraft:").to_ascii_lowercase())
         .filter(|n| !n.is_empty())
         .collect();
     if names.is_empty() {
-        say(game, "/b mine <block>");
+        say(game, "/b mine [n] <block>");
         return;
     }
     rt::with(|s| {
         s.mine_names = names.clone();
+        s.mine_want = want;
+        s.mine_done = 0;
         s.begin(rt::Proc::Mine { next: 0 });
     });
-    say(game, &format!("mining {}", names.join(", ")));
+    let what = names.join(", ");
+    if want > 0 {
+        say(game, &format!("mining {want} of {what}"));
+    } else {
+        say(game, &format!("mining {what}"));
+    }
 }
 
 fn follow(game: &mut Game<'_>, args: &[&str]) {
@@ -958,22 +970,54 @@ fn driver(game: &mut Game<'_>) {
 /// Mine: keep `s.objective` on the nearest matching block in the radius; a
 /// finished path means the block is gone, so rescan.
 fn mine_step(game: &mut Game<'_>) {
-    let (names, radius, cur) =
-        rt::with(|s| (s.mine_names.clone(), s.set.mine_radius, s.objective));
+    let (names, radius, cur, was_drop) = rt::with(|s| {
+        (
+            s.mine_names.clone(),
+            s.set.mine_radius,
+            s.objective,
+            s.drop_pickup,
+        )
+    });
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
     // If a target is still there and still in scan range, keep it.
     if let Some(t) = cur {
-        let st = game.world.block(t[0], t[1], t[2]);
         let in_range = (t[0] - me[0]).abs() <= radius
             && (t[2] - me[2]).abs() <= radius
             && (t[1] - me[1]).abs() <= 16;
-        if in_range
-            && names
+        // A drop objective lives or dies by its entity; a block objective
+        // by its block. Checking a drop's cell block would always miss.
+        let there = if was_drop {
+            game.dropped.iter().any(|it| {
+                names
+                    .iter()
+                    .any(|n| it.stack.item.contains(n.as_str()))
+                    && (it.position.x.floor() as i32 - t[0]).abs() <= 1
+                    && (it.position.y.floor() as i32 - t[1]).abs() <= 1
+                    && (it.position.z.floor() as i32 - t[2]).abs() <= 1
+            })
+        } else {
+            let st = game.world.block(t[0], t[1], t[2]);
+            names
                 .iter()
                 .any(|n| game.res.facts().get(st).name.contains(n.as_str()))
-        {
+        };
+        if in_range && there {
             return;
+        }
+        // Gone but still in range: the block was broken (or the drop was
+        // collected). Count it toward `mine <n>`; out-of-range staleness
+        // (teleport, unload) just falls through to the rescan below.
+        if in_range {
+            let done = rt::with(|s| {
+                s.mine_done += 1;
+                (s.mine_done, s.mine_want)
+            });
+            if done.1 > 0 && done.0 >= done.1 {
+                say(game, &format!("mined {} — done", done.0));
+                rt::with(|s| s.halt());
+                return;
+            }
         }
     }
     if rt::with(|s| s.cooldown > 0) {
@@ -992,7 +1036,9 @@ fn mine_step(game: &mut Game<'_>) {
                 }
                 let st = game.world.block(p[0], p[1], p[2]);
                 let f = game.res.facts().get(st);
-                if f.hardness < 0.0 {
+                if f.hardness < 0.0
+                    || crate::game::umbx_baritone_extras::blacklisted(f.name.as_ref())
+                {
                     continue;
                 }
                 if names.iter().any(|n| f.name.contains(n.as_str())) {

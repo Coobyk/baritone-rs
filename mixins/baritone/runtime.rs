@@ -102,6 +102,11 @@ pub struct State {
     /// Mine objective is a dropped item entity, not a block: walk onto it
     /// (no appended Break move).
     pub drop_pickup: bool,
+    /// `mine <n> <block>` quantity: 0 = unlimited, else stop after this
+    /// many objective blocks (or collected drops) complete.
+    pub mine_want: u32,
+    /// Objectives completed since `mine` began (block gone, drop picked).
+    pub mine_done: u32,
     /// The process's current target cell (mine block, follow spot, ...).
     pub objective: Option<[i32; 3]>,
     /// A feature module's process is active: the input hook should apply
@@ -153,6 +158,8 @@ impl State {
             tunnel_col: [i32::MIN; 3],
             excavate: false,
             drop_pickup: false,
+            mine_want: 0,
+            mine_done: 0,
             want: Want::default(),
             set: Settings {
                 sprint: true,
