@@ -75,7 +75,7 @@ fn client(game: &Game<'_>) -> bool {
 /// Where the player can stand from where they are: their cell, else the
 /// standable cell closest to it.
 fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     let player = game.player.as_ref()?;
     let feet = feet(player);
     // Wherever the player's body actually is — physics truth beats the
@@ -113,7 +113,10 @@ fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
     if w.water(feet) {
         return Some(feet);
     }
-    None
+    // Buried with nothing standable nearby (suffocating in stone, wedged in
+    // gravel): start at the feet anyway — Break successors dig the body out.
+    // Returning None here left the process visibly frozen with no note.
+    Some(feet)
 }
 
 fn opts(s: &rt::State) -> pf::Opts {
@@ -679,10 +682,13 @@ fn mine(game: &mut Game<'_>, args: &[&str]) {
         say(game, "/b mine [n] <block>");
         return;
     }
+    let have0 = inv_count(game, &item_names_for(&names));
     rt::with(|s| {
         s.mine_names = names.clone();
         s.mine_want = want;
         s.mine_done = 0;
+        s.mine_have0 = have0;
+        s.drop_ban.clear();
         s.begin(rt::Proc::Mine { next: 0 });
     });
     let what = names.join(", ");
@@ -889,7 +895,7 @@ fn thisway(game: &mut Game<'_>, args: &[&str]) {
         (x - yaw.to_radians().sin() * n as f64).floor() as i32,
         (z + yaw.to_radians().cos() * n as f64).floor() as i32,
     );
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     let goal = pf::column_top(&w, tx, tz, p.position.y.floor() as i32)
         .unwrap_or([tx, p.position.y.floor() as i32, tz]);
     rt::with(|s| s.begin(rt::Proc::Goto { goal }));
@@ -1004,6 +1010,16 @@ pub(super) fn tick(game: &mut Game<'_>) {
     // moves the hotbar can't supply.
     let can_place = ex::has_placeable(game);
     rt::with(|s| s.has_throwaway = can_place);
+    // Java's `#` prefix: rewrite a leading `#` in the open chat box to
+    // `/b ` — Brigadier then completes it like any /b line, and
+    // `client_mod_command` runs it before the server ever sees it.
+    if let Some((text, _)) = game.native_chat_input()
+        && let Some(rest) = text.strip_prefix('#')
+    {
+        let line = format!("/b {}", rest.trim_start());
+        let end = line.chars().count();
+        let _ = game.native_set_chat_input(&line, end);
+    }
     driver(game);
     auto_eat(game);
     // `click` pulses and the auto-eat hold overlay whatever the driver
@@ -1102,7 +1118,7 @@ fn driver(game: &mut Game<'_>) {
 
     // Re-plan when the path is exhausted (or was cleared).
     if rt::with(|s| s.at >= s.path.len()) {
-        let w = pf::W { game };
+        let w = pf::W::new(game);
         let Some(start) = start_cell(game) else { return };
         let o = rt::with(|s| opts(s));
         let path = match proc {
@@ -1171,10 +1187,32 @@ fn driver(game: &mut Game<'_>) {
                     s.note.clear();
                 });
             }
-            None => rt::with(|s| {
-                s.note = format!("no path from {:?} to {:?} (me {:?})", start, goal, me);
-                s.stuck = 120
-            })
+            None => {
+                // An unreachable drop gets banned and skipped — the rescan
+                // picks the next candidate — instead of counting as a
+                // fatal plan failure that halts the mine.
+                if matches!(proc, rt::Proc::Mine { .. })
+                    && rt::with(|s| s.drop_pickup)
+                    && rt::with(|s| s.objective).is_some()
+                {
+                    rt::with(|s| {
+                        if let Some(cell) = s.objective {
+                            s.drop_ban.push((cell, 600));
+                        }
+                        s.objective = None;
+                        s.drop_pickup = false;
+                        s.drop_stall = 0;
+                        s.stuck = 0;
+                        s.note.clear();
+                    });
+                } else {
+                    rt::with(|s| {
+                        s.note =
+                            format!("no path from {:?} to {:?} (me {:?})", start, goal, me);
+                        s.stuck = 120
+                    });
+                }
+            }
         }
     }
 
@@ -1186,13 +1224,16 @@ fn driver(game: &mut Game<'_>) {
     // disagree with itself for a tick, and re-checking instantly spins a
     // plan→flag→plan loop that never lets a move run.
     {
-        let w = pf::W { game };
+        let w = pf::W::new(game);
         let stale = rt::with(|s| {
             if s.stale_cd > 0 {
                 s.stale_cd -= 1;
                 return false;
             }
-            let bad = s.path[s.at..].iter().take(10).find(|m| {
+            // `at` can sit past a cleared/exhausted path (a failed re-plan
+            // leaves `at` mid-range on an empty vec) — clamp, never slice
+            // out of range.
+            let bad = s.path[s.at.min(s.path.len())..].iter().take(10).find(|m| {
                 match m.kind {
                     pf::Kind::Walk
                     | pf::Kind::Step
@@ -1222,7 +1263,13 @@ fn driver(game: &mut Game<'_>) {
 
     // Execute the current move.
     let step = rt::with(|s| s.path.get(s.at).cloned());
-    let prev = rt::with(|s| if s.at == 0 { me } else { s.path[s.at - 1].pos });
+    let prev = rt::with(|s| {
+        if s.at == 0 {
+            me
+        } else {
+            s.path.get(s.at - 1).map_or(me, |m| m.pos)
+        }
+    });
     let mut vertical_move = false;
     if let Some(m) = step {
         vertical_move = matches!(
@@ -1231,6 +1278,9 @@ fn driver(game: &mut Game<'_>) {
                 | pf::Kind::Pillar
                 | pf::Kind::Drop { .. }
                 | pf::Kind::Downward
+                // Swimming up a water column gains Y slowly — count it so
+                // the watchdog's vertical-progress check applies.
+                | pf::Kind::Swim
         );
         match rt::with(|s| ex::drive(game, s, &m, prev)) {
             ex::Out::Done => {
@@ -1332,6 +1382,81 @@ fn driver(game: &mut Game<'_>) {
     ex::apply(game, &want);
 }
 
+/// Item names a mined block's drops carry — the search names plus the
+/// ore→item cases where block and drop share no substring (Java resolves
+/// these through its block→item table; a small static map covers the
+/// practical cases).
+fn drop_aliases(name: &str) -> &'static [&'static str] {
+    match name {
+        "coal_ore" => &["coal"],
+        "iron_ore" => &["raw_iron"],
+        "copper_ore" => &["raw_copper"],
+        "gold_ore" => &["raw_gold"],
+        "nether_gold_ore" => &["gold_nugget"],
+        "lapis_ore" => &["lapis_lazuli", "lapis"],
+        "redstone_ore" => &["redstone"],
+        "diamond_ore" => &["diamond"],
+        "emerald_ore" => &["emerald"],
+        "quartz_ore" | "nether_quartz_ore" => &["quartz", "nether_quartz"],
+        "stone" => &["cobblestone"],
+        "grass_block" => &["dirt"],
+        "clay" => &["clay_ball"],
+        "glowstone" => &["glowstone_dust"],
+        "snow" | "snow_layer" => &["snowball"],
+        "bookshelf" | "chiseled_bookshelf" => &["book"],
+        "sea_lantern" => &["prismarine_crystals"],
+        "melon" => &["melon_slice"],
+        "wheat" => &["wheat_seeds"],
+        "carrots" => &["carrot"],
+        "potatoes" => &["potato"],
+        "beetroots" => &["beetroot", "beetroot_seeds"],
+        "nether_wart" | "nether_wart_plant" => &["nether_wart"],
+        "sweet_berry_bush" => &["sweet_berries"],
+        "cocoa" => &["cocoa_beans"],
+        _ => &[],
+    }
+}
+
+/// Search names expanded with their drop aliases — used to match dropped
+/// item entities and to count inventory gains. Block scans keep the raw
+/// names: `mine stone` mustn't start breaking cobblestone.
+fn item_names_for(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = names.to_vec();
+    for n in names {
+        for a in drop_aliases(n) {
+            let a = a.to_string();
+            if !out.iter().any(|o| o == &a) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
+/// Total count of matching item stacks across the whole inventory (Java's
+/// `mine` quota counts items gained, so a drop lost to lava doesn't).
+fn inv_count(game: &Game<'_>, names: &[String]) -> i64 {
+    game.inventory
+        .iter()
+        .flatten()
+        .filter(|st| st.count > 0)
+        .map(|st| {
+            let n = st.item.trim_start_matches("minecraft:");
+            if names.iter().any(|m| n.contains(m.as_str())) {
+                st.count as i64
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+/// Does the dropped-item entity `it` match any name in `names`?
+fn drop_matches(it: &crate::entities::ItemEntity, names: &[String]) -> bool {
+    let n = it.stack.item.trim_start_matches("minecraft:");
+    names.iter().any(|m| n.contains(m.as_str()))
+}
+
 /// Mine: keep `s.objective` on the nearest matching block in the radius; a
 /// finished path means the block is gone, so rescan.
 fn mine_step(game: &mut Game<'_>) {
@@ -1345,6 +1470,30 @@ fn mine_step(game: &mut Game<'_>) {
             s.set.legit_mine,
         )
     });
+    let item_names = item_names_for(&names);
+    // Java parity: `mine <n>` counts matching items gained, not blocks
+    // broken — a broken block whose drop despawned or fell in lava doesn't
+    // count, and a drop lying on the ground does. The quota check runs
+    // before the objective checks so collecting the final drop ends the
+    // mine the tick it lands in the inventory.
+    let want_q = rt::with(|s| s.mine_want);
+    if want_q > 0 {
+        let have0 = rt::with(|s| s.mine_have0);
+        let done = (inv_count(game, &item_names) - have0).max(0) as u32;
+        rt::with(|s| s.mine_done = done);
+        if done >= want_q {
+            say(game, &format!("mined {} — done", done));
+            rt::with(|s| s.halt());
+            return;
+        }
+    }
+    // Age banned drop cells.
+    rt::with(|s| {
+        for b in &mut s.drop_ban {
+            b.1 = b.1.saturating_sub(1);
+        }
+        s.drop_ban.retain(|b| b.1 > 0);
+    });
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
     let eye = [
@@ -1352,7 +1501,7 @@ fn mine_step(game: &mut Game<'_>) {
         player.position.y + 1.62,
         player.position.z,
     ];
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     // If a target is still there and still in scan range, keep it.
     if let Some(t) = cur {
         let in_range = (t[0] - me[0]).abs() <= radius
@@ -1362,9 +1511,7 @@ fn mine_step(game: &mut Game<'_>) {
         // by its block. Checking a drop's cell block would always miss.
         let there = if was_drop {
             game.dropped.iter().any(|it| {
-                names
-                    .iter()
-                    .any(|n| it.stack.item.contains(n.as_str()))
+                drop_matches(it, &item_names)
                     && (it.position.x.floor() as i32 - t[0]).abs() <= 1
                     && (it.position.y.floor() as i32 - t[1]).abs() <= 1
                     && (it.position.z.floor() as i32 - t[2]).abs() <= 1
@@ -1376,33 +1523,65 @@ fn mine_step(game: &mut Game<'_>) {
                 .any(|n| game.res.facts().get(st).name.contains(n.as_str()))
         };
         if in_range && there {
-            return;
-        }
-        // Gone but still in range: the block was broken (or the drop was
-        // collected). Count it toward `mine <n>`; out-of-range staleness
-        // (teleport, unload) just falls through to the rescan below.
-        if in_range {
-            let done = rt::with(|s| {
-                s.mine_done += 1;
-                (s.mine_done, s.mine_want)
-            });
-            if done.1 > 0 && done.0 >= done.1 {
-                say(game, &format!("mined {} — done", done.0));
-                rt::with(|s| s.halt());
+            // Standing on a drop that won't collect (another player's
+            // throw, wedged in geometry): ban the cell instead of letting
+            // the stuck watchdog kill the whole mine.
+            let mut banned = false;
+            if was_drop {
+                let near = (t[0] - me[0]).abs() <= 3
+                    && (t[2] - me[2]).abs() <= 3
+                    && (t[1] - me[1]).abs() <= 2;
+                let stall = rt::with(|s| {
+                    if near {
+                        s.drop_stall += 1;
+                    } else {
+                        s.drop_stall = 0;
+                    }
+                    s.drop_stall
+                });
+                if stall > 200 {
+                    rt::with(|s| {
+                        s.drop_ban.push((t, 600));
+                        s.objective = None;
+                        s.drop_pickup = false;
+                        s.drop_stall = 0;
+                        s.path.clear();
+                    });
+                    banned = true;
+                }
+            }
+            if !banned {
                 return;
             }
         }
+        rt::with(|s| s.drop_stall = 0);
+        // Objective gone (block broken, drop collected or despawned,
+        // or cell unloaded) — fall through to the rescan below. The
+        // inventory-delta check above handles the `mine <n>` quota.
     }
     if rt::with(|s| s.cooldown > 0) {
         rt::with(|s| s.cooldown -= 1);
         return;
     }
     rt::with(|s| s.cooldown = 5);
-    // Scan nearest-first for a matching breakable block.
+    // Scan nearest-first for a matching breakable block. Columns whose
+    // manhattan distance can't beat the current best are skipped before
+    // the block lookup — 72k+ world reads per rescan used to hitch the
+    // game every 5 ticks.
     let mut best: Option<(i32, [i32; 3], bool)> = None;
+    let mut bd = i32::MAX;
     for dx in -radius..=radius {
+        if dx.abs() > bd {
+            continue;
+        }
         for dz in -radius..=radius {
+            if dx.abs() + dz.abs() > bd {
+                continue;
+            }
             for dy in -8i32..=8 {
+                if dx.abs() + dz.abs() + dy.abs() > bd {
+                    continue;
+                }
                 let p = [me[0] + dx, me[1] + dy, me[2] + dz];
                 if p[1] < game.world.shape.min_y || p[1] > game.world.shape.max_y() {
                     continue;
@@ -1449,7 +1628,8 @@ fn mine_step(game: &mut Game<'_>) {
                         }
                     }
                     let d = dx.abs() + dy.abs() + dz.abs();
-                    if best.map_or(true, |(b, _, _)| d < b) {
+                    if d < bd {
+                        bd = d;
                         best = Some((d, p, false));
                     }
                 }
@@ -1457,32 +1637,29 @@ fn mine_step(game: &mut Game<'_>) {
         }
     }
     // `mineScanDroppedItems`: dropped entities matching a target count as
-    // objectives too — walking over one collects it.
+    // objectives too — walking over one collects it. Item names include
+    // drop aliases (`mine coal_ore` sweeps `coal` drops); banned cells
+    // (unreachable or uncollectible drops) are skipped.
     if rt::with(|s| s.set.mine_scan_drops) {
         for it in &game.dropped {
-            let n = it.stack.item.trim_start_matches("minecraft:");
-            if !names.iter().any(|m| n.contains(m.as_str())) {
+            if !drop_matches(it, &item_names) {
                 continue;
             }
-            let c = [
-                it.position.x.floor() as i32 - me[0],
-                it.position.y.floor() as i32 - me[1],
-                it.position.z.floor() as i32 - me[2],
+            let cell = [
+                it.position.x.floor() as i32,
+                it.position.y.floor() as i32,
+                it.position.z.floor() as i32,
             ];
+            if rt::with(|s| s.drop_ban.iter().any(|(b, _)| *b == cell)) {
+                continue;
+            }
+            let c = [cell[0] - me[0], cell[1] - me[1], cell[2] - me[2]];
             if c[0].abs() > radius || c[2].abs() > radius || c[1].abs() > 16 {
                 continue;
             }
             let d = c[0].abs() + c[1].abs() + c[2].abs();
             if best.map_or(true, |(b, _, _)| d < b) {
-                best = Some((
-                    d,
-                    [
-                        it.position.x.floor() as i32,
-                        it.position.y.floor() as i32,
-                        it.position.z.floor() as i32,
-                    ],
-                    true,
-                ));
+                best = Some((d, cell, true));
             }
         }
     }
@@ -1604,7 +1781,7 @@ fn explore_step(game: &mut Game<'_>) {
             return;
         }
     }
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     let names = rt::with(|s| s.explore_names.clone());
     if !names.is_empty() {
         // Nearest matching block with a standable face-adjacent cell in a
@@ -1730,7 +1907,7 @@ fn tunnel_step(game: &mut Game<'_>) {
         });
         return;
     }
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     let col = rt::with(|s| s.tunnel_col);
     if col == [i32::MIN; 3] {
         // First step: aim at the column ahead and queue its cross-section.

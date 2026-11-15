@@ -147,10 +147,21 @@ pub struct State {
     /// (no appended Break move).
     pub drop_pickup: bool,
     /// `mine <n> <block>` quantity: 0 = unlimited, else stop after this
-    /// many objective blocks (or collected drops) complete.
+    /// many matching items have entered the inventory (Java counts items
+    /// gained, not blocks broken — a broken block whose drop was lost
+    /// doesn't count).
     pub mine_want: u32,
-    /// Objectives completed since `mine` began (block gone, drop picked).
+    /// Matching items gained since `mine` began (inventory delta).
     pub mine_done: u32,
+    /// Inventory count of matching items when `mine` started.
+    pub mine_have0: i64,
+    /// Drop cells banned after a failed plan or a stalled pickup —
+    /// `(cell, ticks left)`. An unreachable or phantom drop must not
+    /// wedge the rescan on the same target forever.
+    pub drop_ban: Vec<([i32; 3], u32)>,
+    /// Ticks the current drop objective has persisted while the player
+    /// stands on it — a drop that won't despawn or collect gets banned.
+    pub drop_stall: u32,
     /// `legitMine`: cells raycast-verified visible this session. Once seen,
     /// an ore stays mineable even after it falls out of sight.
     pub seen_ores: std::collections::HashSet<[i32; 3]>,
@@ -214,6 +225,9 @@ impl State {
             drop_pickup: false,
             mine_want: 0,
             mine_done: 0,
+            mine_have0: 0,
+            drop_ban: Vec::new(),
+            drop_stall: 0,
             seen_ores: std::collections::HashSet::new(),
             want: Want::default(),
             set: Settings {
@@ -287,6 +301,7 @@ impl State {
         self.cooldown = 0;
         self.excavate = false;
         self.drop_pickup = false;
+        self.drop_stall = 0;
         self.tunnel_queue.clear();
         self.tunnel_col = [i32::MIN; 3];
     }

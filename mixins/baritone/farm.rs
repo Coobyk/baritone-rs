@@ -163,7 +163,7 @@ fn opts(s: &rt::State) -> pf::Opts {
 
 /// Where the player can path from: their cell, else the nearest standable.
 fn start_cell(game: &crate::game::Game<'_>) -> Option<[i32; 3]> {
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     let feet = feet(game.player.as_ref()?);
     if w.standable(feet) {
         return Some(feet);
@@ -471,7 +471,7 @@ fn step(game: &mut crate::game::Game<'_>) {
 
     // Path to any standable cell whose centre is within reach of the job.
     if with(|s| s.at >= s.path.len()) {
-        let w = pf::W { game };
+        let w = pf::W::new(game);
         let Some(start) = start_cell(game) else { return };
         let o = rt::with(|s| opts(s));
         let target = job.cell;

@@ -463,7 +463,7 @@ fn goal(game: &mut Game<'_>, args: &[&str]) {
                 .map(feet)
                 .map(|f| f[1])
                 .unwrap_or(64);
-            let w = pf::W { game };
+            let w = pf::W::new(game);
             pf::column_top(&w, *x, *z, ny)
         }
         _ => None,
@@ -506,7 +506,7 @@ fn path(game: &mut Game<'_>) -> bool {
                 p.position.z.floor() as i32,
             )
         };
-        let w = pf::W { game };
+        let w = pf::W::new(game);
         pf::column_top(&w, tx, tz, p.position.y.floor() as i32)
             .unwrap_or([tx, p.position.y.floor() as i32, tz])
     } else {
@@ -561,7 +561,7 @@ fn find_cmd(game: &mut Game<'_>, args: &[&str]) {
     // Stand next to the block: a standable face-adjacent cell, else whatever
     // the column offers above it.
     let goal = {
-        let w = pf::W { game };
+        let w = pf::W::new(game);
         let mut g = None;
         for off in [
             [1, 0, 0],
@@ -603,7 +603,7 @@ fn surface(game: &mut Game<'_>) {
         return;
     };
     let near = game.world.shape.max_y();
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     match pf::column_top(&w, f[0], f[2], near) {
         Some(g) => {
             rt::with(|s| s.begin(rt::Proc::Goto { goal: g }));

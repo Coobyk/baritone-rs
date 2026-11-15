@@ -195,7 +195,7 @@ fn name_match(f_name: &str, want: &str) -> bool {
 
 /// Where the player can stand from where they are (same as the core's).
 fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
-    let w = pf::W { game };
+    let w = pf::W::new(game);
     let feet = feet(game.player.as_ref()?);
     if w.standable(feet) {
         return Some(feet);
@@ -601,7 +601,7 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
     if jobs(|j| j.at >= j.path.len()) {
         let o = rt::with(|s| opts(s));
         let found = {
-            let w = pf::W { game };
+            let w = pf::W::new(game);
             start_cell(game).and_then(|start| {
                 pf::find(&w, start, goal, &o, |p, _| {
                     w.standable(p) && cell_dist2(p, goal) <= NEAR
@@ -655,7 +655,13 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
     }
 
     let step = jobs(|j| j.path.get(j.at).cloned());
-    let prev = jobs(|j| if j.at == 0 { me } else { j.path[j.at - 1].pos });
+    let prev = jobs(|j| {
+        if j.at == 0 {
+            me
+        } else {
+            j.path.get(j.at - 1).map_or(me, |m| m.pos)
+        }
+    });
     if let Some(m) = step {
         match rt::with(|s| ex::drive(game, s, &m, prev)) {
             ex::Out::Done => {

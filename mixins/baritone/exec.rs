@@ -248,6 +248,11 @@ pub fn drive(
     };
     let pos = player.position;
     let on_ground = player.ground.on_ground;
+    // Swimming: the body never reports on_ground while floating, so moves
+    // that demand it would never arrive — water counts as its own footing.
+    let in_water = player.fluids.was_touching_water;
+    let eye_in_water = player.fluids.was_eye_in_water;
+    let footing = on_ground || in_water;
     let me = feet(player);
     let c = center(m.pos);
     // A move ends once we're firmly on its cell — integer feet can hover on
@@ -277,7 +282,7 @@ pub fn drive(
                 | pf::Kind::Parkour { .. }
                 | pf::Kind::ParkourPlace { .. }
         )
-        && !on_ground
+        && !footing
     {
         arrived = false;
     }
@@ -295,6 +300,12 @@ pub fn drive(
     let c = center(m.pos);
     match m.kind {
         pf::Kind::Walk | pf::Kind::Drop { .. } | pf::Kind::Swim => {
+            // A 1-cell swim that can't land in ~5s is pressed against a
+            // wall or fighting a current — failing forces a re-plan, and
+            // submerged cells now cost enough to route around the water.
+            if m.kind == pf::Kind::Swim && ticks_on(m, 3) > 100 {
+                return Out::Failed;
+            }
             aim(game, c);
             w.forward = 1.0;
             // Stay up while crossing water; hop when the route climbs even
@@ -500,6 +511,11 @@ pub fn drive(
                 w.forward = 1.0;
             }
         }
+    }
+    // Drowning beats route fidelity: a submerged head or a floating body
+    // with no footing keeps paddling upward whatever the move wants.
+    if eye_in_water || (in_water && !on_ground) {
+        w.jump = true;
     }
     st.want = w;
     Out::Working

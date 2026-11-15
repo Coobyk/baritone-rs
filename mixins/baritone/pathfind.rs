@@ -6,9 +6,15 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::time::Instant;
+
+use horizon_client::fast_hash::FxHashMap;
 
 pub const MAX_NODES: usize = 120_000;
+/// Wall-clock budget for one plan. The search runs on the game thread, so
+/// an unlucky long path used to stall frames for seconds; past this the
+/// partial path (walk toward the goal, re-plan closer) takes over.
+const BUDGET_MS: u64 = 120;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
@@ -80,18 +86,47 @@ pub struct Opts {
     pub sprint_water: bool,
 }
 
-/// Read-only world facts the planner needs, borrowing from `Game`.
+/// Read-only world facts the planner needs, borrowing from `Game`. Facts
+/// are memoized per cell — neighbouring nodes re-check the same cells
+/// constantly, and a bare `world.block` lookup was the search's hot spot.
 pub struct W<'a> {
     pub game: &'a crate::game::Game<'a>,
+    facts: std::cell::RefCell<FxHashMap<[i32; 3], &'a horizon_items::blocks::StateFacts>>,
+    /// Settings snapshots: `assumeWalkOnWater`, `assumeWalkOnLava`,
+    /// `allowWalkOnBottomSlab` — read once instead of per-cell state locks.
+    aw: bool,
+    al: bool,
+    slab: bool,
+}
+
+impl<'a> W<'a> {
+    pub fn new(game: &'a crate::game::Game<'a>) -> Self {
+        let (aw, al, slab) = crate::game::umbx_baritone::with(|s| {
+            (s.set.assume_water, s.set.assume_lava, s.set.bottom_slab)
+        });
+        Self {
+            game,
+            facts: std::cell::RefCell::new(FxHashMap::default()),
+            aw,
+            al,
+            slab,
+        }
+    }
 }
 
 impl W<'_> {
     /// Facts of the block state at `p` (unloaded chunks read as air).
     fn fat(&self, p: [i32; 3]) -> &horizon_items::blocks::StateFacts {
-        self.game
-            .res
-            .facts()
-            .get(self.game.world.block(p[0], p[1], p[2]))
+        *self
+            .facts
+            .borrow_mut()
+            .entry(p)
+            .or_insert_with(|| {
+                self.game
+                    .res
+                    .facts()
+                    .get(self.game.world.block(p[0], p[1], p[2]))
+            })
     }
 
     /// Highest Y worth scanning (world top minus headroom).
@@ -123,7 +158,7 @@ impl W<'_> {
         if !f.name.contains("slab") && !f.name.contains("stairs") {
             return false;
         }
-        crate::game::umbx_baritone::with(|s| s.set.bottom_slab)
+        self.slab
     }
 
     /// Something solid to stand on under `p`. `assumeWalkOnWater` /
@@ -134,10 +169,7 @@ impl W<'_> {
         if self.block_solid(b) {
             return true;
         }
-        let (aw, al) = crate::game::umbx_baritone::with(|s| {
-            (s.set.assume_water, s.set.assume_lava)
-        });
-        (aw && self.water(b)) || (al && self.lava(b))
+        (self.aw && self.water(b)) || (self.al && self.lava(b))
     }
 
     /// `p` is standable: two open cells over a floor.
@@ -622,16 +654,18 @@ pub fn find_partial(
     }
 
     let mut open = BinaryHeap::new();
-    let mut g: HashMap<[i32; 3], f64> = HashMap::new();
+    let mut g: FxHashMap<[i32; 3], f64> = FxHashMap::default();
     // Predecessor: cell -> the move that ended there (its `pos` is the cell).
-    let mut came: HashMap<[i32; 3], ([i32; 3], Move)> = HashMap::new();
+    let mut came: FxHashMap<[i32; 3], ([i32; 3], Move)> = FxHashMap::default();
     g.insert(start, 0.0);
     open.push(Frontier { f: h(start, goal), at: start });
+    let t0 = Instant::now();
     let mut pops = 0usize;
     let mut best: [i32; 3] = start;
     let mut best_h = h(start, goal);
+    let mut ns: Vec<Move> = Vec::with_capacity(24);
 
-    let path_to = |end: [i32; 3], came: &HashMap<[i32; 3], ([i32; 3], Move)>| {
+    let path_to = |end: [i32; 3], came: &FxHashMap<[i32; 3], ([i32; 3], Move)>| {
         let mut out = Vec::new();
         let mut cur = end;
         while let Some((prev, m)) = came.get(&cur) {
@@ -652,20 +686,22 @@ pub fn find_partial(
             best = p;
         }
         pops += 1;
-        if pops > MAX_NODES {
+        if pops > MAX_NODES
+            || (pops & 0x1FF) == 0
+                && t0.elapsed() > std::time::Duration::from_millis(BUDGET_MS)
+        {
             break;
         }
         let gp = g[&p];
-        let mut ns = Vec::new();
+        ns.clear();
         succ(w, p, o, &mut ns);
-        let assume_lava = crate::game::umbx_baritone::with(|s| s.set.assume_lava);
-        for m in ns {
+        for m in ns.drain(..) {
             // Never end a move with lava at feet or head. The floor gets a
             // pass under assumeWalkOnLava — the cheat exists precisely so
             // paths can end standing on a lava surface.
             if w.lava(m.pos)
                 || w.lava([m.pos[0], m.pos[1] + 1, m.pos[2]])
-                || (!assume_lava && w.lava([m.pos[0], m.pos[1] - 1, m.pos[2]]))
+                || (!w.al && w.lava([m.pos[0], m.pos[1] - 1, m.pos[2]]))
             {
                 continue;
             }
@@ -688,7 +724,16 @@ pub fn find_partial(
                 Kind::ParkourPlace { gap } => 4.5 + gap as f64,
                 Kind::Ladder { .. } => 1.8,
                 // `sprintInWater` off: no sprint-gliding, water legs cost more.
-                Kind::Swim => if o.sprint_water { 2.2 } else { 4.4 },
+                // A submerged head at the destination means real drowning
+                // time — price it so dry routes win unless the dip is short.
+                Kind::Swim => {
+                    let base = if o.sprint_water { 2.2 } else { 4.4 };
+                    if w.water([m.pos[0], m.pos[1] + 1, m.pos[2]]) {
+                        base + 25.0
+                    } else {
+                        base
+                    }
+                }
                 Kind::Break { .. } => 1.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Downward => 2.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Pillar => 3.5,
@@ -697,7 +742,7 @@ pub fn find_partial(
             };
             // Standing next to lava is risky: prefer routes that keep away.
             // With assumeWalkOnLava the danger is assumed away too.
-            if !assume_lava && w.lava_near(m.pos) {
+            if !w.al && w.lava_near(m.pos) {
                 edge += 5.0;
             }
             // `blocksToAvoid`: the body cells at the destination hold an
@@ -714,9 +759,10 @@ pub fn find_partial(
             }
             let ng = gp + edge;
             if ng < *g.get(&m.pos).unwrap_or(&f64::INFINITY) {
-                g.insert(m.pos, ng);
-                came.insert(m.pos, (p, m.clone()));
-                open.push(Frontier { f: ng + h(m.pos, goal), at: m.pos });
+                let at = m.pos;
+                g.insert(at, ng);
+                came.insert(at, (p, m));
+                open.push(Frontier { f: ng + h(at, goal), at });
             }
         }
     }

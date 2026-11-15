@@ -256,8 +256,28 @@ fn fill_box(
     draw.pop();
 }
 
-/// Java's red path line: a thin quad ribbon between consecutive node
-/// centres, flat like a GL line ~4 cm wide (no line primitive exists).
+/// One ribbon of the path line: a thin quad strip along the segment,
+/// offset by `p` (the perpendicular half-width vector), both windings.
+fn ribbon(
+    game: &Game<'_>,
+    draw: &mut crate::mod_api::NativeWorldDraw,
+    d: [f32; 3],
+    p: [f32; 3],
+) {
+    let corners: [[f32; 3]; 4] = [
+        [p[0], p[1], p[2]],
+        [-p[0], -p[1], -p[2]],
+        [d[0] - p[0], d[1] - p[1], d[2] - p[2]],
+        [d[0] + p[0], d[1] + p[1], d[2] + p[2]],
+    ];
+    game.native_world_quad(draw, LINE_SPRITE, corners, [0., 0., 16., 16.], LINE_RGBA);
+    let rev = [corners[3], corners[2], corners[1], corners[0]];
+    game.native_world_quad(draw, LINE_SPRITE, rev, [0., 0., 16., 16.], LINE_RGBA);
+}
+
+/// Java's red path line: two crossed quad ribbons per segment — one flat,
+/// one standing — so it reads as a line looking down, across, and along
+/// climbs (no line primitive exists).
 fn line_segment(
     game: &Game<'_>,
     draw: &mut crate::mod_api::NativeWorldDraw,
@@ -273,35 +293,36 @@ fn line_segment(
     if len < 0.05 {
         return;
     }
-    // Ribbon half-width: perpendicular to the segment in the horizontal
-    // plane, so flat paths read as a red strip on the ground.
-    let mut px = -d[2];
-    let mut pz = d[0];
-    let pl = (px * px + pz * pz).sqrt();
-    if pl < 1e-4 {
+    let (ux, uy, uz) = (d[0] / len, d[1] / len, d[2] / len);
+    // First perpendicular: horizontal (the flat ribbon on the ground).
+    let (mut hx, mut hz) = (-uz, ux);
+    let hl = (hx * hx + hz * hz).sqrt();
+    if hl < 1e-4 {
         // Vertical segment: any horizontal perpendicular works.
-        px = 1.0;
-        pz = 0.0;
+        hx = 1.0;
+        hz = 0.0;
     } else {
-        px /= pl;
-        pz /= pl;
+        hx /= hl;
+        hz /= hl;
     }
-    let (px, pz) = (px * LINE_HALF, pz * LINE_HALF);
-    let corners: [[f32; 3]; 4] = [
-        [px, 0.0, pz],
-        [-px, 0.0, -pz],
-        [d[0] - px, d[1], d[2] - pz],
-        [d[0] + px, d[1], d[2] + pz],
-    ];
+    // Second: perpendicular to both — the standing fin, which degenerates
+    // to a flat strip for fully vertical segments (cross is zero-length).
+    let (vx, vy, vz) = (uy * hz, -(ux * hz - uz * hx), -uy * hx);
+    let vl = (vx * vx + vy * vy + vz * vz).sqrt().max(1e-4);
+    let (vx, vy, vz) = (
+        vx / vl * LINE_HALF,
+        vy / vl * LINE_HALF,
+        vz / vl * LINE_HALF,
+    );
+    let (hx, hz) = (hx * LINE_HALF, hz * LINE_HALF);
     draw.push();
     if draw.translate_world([
         a[0] as f64 + 0.5,
         a[1] as f64 + 0.5,
         a[2] as f64 + 0.5,
     ]) {
-        game.native_world_quad(draw, LINE_SPRITE, corners, [0., 0., 16., 16.], LINE_RGBA);
-        let rev = [corners[3], corners[2], corners[1], corners[0]];
-        game.native_world_quad(draw, LINE_SPRITE, rev, [0., 0., 16., 16.], LINE_RGBA);
+        ribbon(game, draw, d, [hx, 0.0, hz]);
+        ribbon(game, draw, d, [vx, vy, vz]);
     }
     draw.pop();
 }
