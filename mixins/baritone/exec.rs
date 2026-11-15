@@ -31,14 +31,34 @@ fn aim(game: &mut crate::game::Game<'_>, at: [f64; 3]) {
     let dy = at[1] - (p.position.y + 1.62);
     let pitch = (-dy.atan2(dx.hypot(dz)).to_degrees()) as f32;
     game.yaw = yaw;
+    game.pitch = pitch;
     let p = game.player.as_mut().unwrap();
     p.yaw = yaw;
     p.head_yaw = yaw;
-    let _ = pitch;
+    p.pitch = pitch;
 }
 
 fn center(p: [i32; 3]) -> [f64; 3] {
     [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5]
+}
+
+/// The face of `b` most visible from the player's eye — dominant axis from
+/// the block centre toward the eye.
+fn face_toward(game: &crate::game::Game<'_>, b: [i32; 3]) -> [i32; 3] {
+    let Some(p) = game.player.as_ref() else { return [0, 1, 0] };
+    let eye = [p.position.x, p.position.y + 1.62, p.position.z];
+    let d = [
+        eye[0] - (b[0] as f64 + 0.5),
+        eye[1] - (b[1] as f64 + 0.5),
+        eye[2] - (b[2] as f64 + 0.5),
+    ];
+    if d[0].abs() >= d[1].abs() && d[0].abs() >= d[2].abs() {
+        [d[0].signum() as i32, 0, 0]
+    } else if d[1].abs() >= d[2].abs() {
+        [0, d[1].signum() as i32, 0]
+    } else {
+        [0, 0, d[2].signum() as i32]
+    }
 }
 
 fn face_hit(cell: [i32; 3], face: [i32; 3]) -> crate::game::Hit {
@@ -254,8 +274,8 @@ pub fn drive(
                 Some(b) => {
                     tool_for(game, b);
                     aim(game, center(b));
-                    // Face the block's top face and hold attack.
-                    w.hit = Some(face_hit(b, [0, 1, 0]));
+                    // Face the side the player can actually see.
+                    w.hit = Some(face_hit(b, face_toward(game, b)));
                     w.attack = true;
                     w.forward = 0.0;
                     st.want = w;

@@ -516,13 +516,13 @@ fn driver(game: &mut Game<'_>) {
                 pf::find(&w, start, goal, &o, |p, _| w.standable(p) && p[1] == y)
             }
             rt::Proc::Mine { .. } | rt::Proc::Follow => {
-                pf::find(&w, start, goal, &o, |p, _| {
+                pf::find_partial(&w, start, goal, &o, |p, _| {
                     w.standable(p)
                         && ((p[0] - goal[0]).pow(2)
                             + (p[1] - goal[1]).pow(2)
                             + (p[2] - goal[2]).pow(2)) as f64
                             <= 18.0
-                })
+                }, true)
             }
             rt::Proc::GotoXZ { .. } => {
                 pf::find_partial(&w, start, goal, &o, |p, g| p[0] == g[0] && p[2] == g[2], true)
@@ -622,8 +622,16 @@ fn driver(game: &mut Game<'_>) {
                 }
             }
             ex::Out::Failed => {
-                say(game, "can't do that move — stopping");
-                rt::with(|s| s.halt());
+                // Baritone treats a failed move as a route defect: skip this
+                // node and let the path re-plan rather than abandoning the job.
+                let done = rt::with(|s| {
+                    s.at += 1;
+                    s.stuck = 0;
+                    s.at >= s.path.len()
+                });
+                if done {
+                    rt::with(|s| s.path.clear());
+                }
             }
             ex::Out::Working => {}
         }
@@ -669,12 +677,16 @@ fn mine_step(game: &mut Game<'_>) {
         rt::with(|s| (s.mine_names.clone(), s.set.mine_radius, s.objective));
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
-    // If a target is still there, keep it.
+    // If a target is still there and still in scan range, keep it.
     if let Some(t) = cur {
         let st = game.world.block(t[0], t[1], t[2]);
-        if names
-            .iter()
-            .any(|n| game.res.facts().get(st).name.contains(n.as_str()))
+        let in_range = (t[0] - me[0]).abs() <= radius
+            && (t[2] - me[2]).abs() <= radius
+            && (t[1] - me[1]).abs() <= 16;
+        if in_range
+            && names
+                .iter()
+                .any(|n| game.res.facts().get(st).name.contains(n.as_str()))
         {
             return;
         }
