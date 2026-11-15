@@ -301,6 +301,10 @@ pub fn drive(
             // within what the planner labelled a flat walk (slabs, snow,
             // slopes whose midpoint cell read as the same y).
             w.jump = m.kind == pf::Kind::Swim || m.pos[1] > me[1];
+            // `sprintInWater` off: no sprint-gliding through water.
+            if m.kind == pf::Kind::Swim && !st.set.sprint_water {
+                w.sprint = false;
+            }
         }
         pf::Kind::Step => {
             aim(game, c);
@@ -367,7 +371,10 @@ pub fn drive(
                 .find(|&b| solid(game, b));
             match next {
                 Some(b) => {
-                    tool_for(game, b);
+                    // `toolSelect`: keep the held item when off.
+                    if st.set.tool_select {
+                        tool_for(game, b);
+                    }
                     aim(game, center(b));
                     // Face the side the player can actually see.
                     w.hit = Some(face_hit(b, face_toward(game, b)));
@@ -393,7 +400,9 @@ pub fn drive(
                 if ticks_on(m, 0) > 200 {
                     return Out::Failed;
                 }
-                tool_for(game, f);
+                if st.set.tool_select {
+                    tool_for(game, f);
+                }
                 aim(game, center(f));
                 w.hit = Some(face_hit(f, [0, 1, 0]));
                 w.attack = true;

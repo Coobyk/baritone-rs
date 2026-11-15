@@ -22,19 +22,13 @@ use crate::game::Game;
 /// Baritone setting names accepted as stored no-ops (`cfg_<name>`). The
 /// string is the default reported by `/b set`, `/b modified` and `/b reset`.
 /// Names that map onto a real setting (allowBreak, allowSprint, allowPlace,
-/// allowParkour) are handled by `set_real` before this table is consulted.
+/// allowParkour, allowDownward, allowVines, the diagonals, assumeStep,
+/// sprintInWater, toolSelect, allowWalkOnBottomSlab) are handled by
+/// `set_real` before this table is consulted. `buildIgnoreBlocks`,
+/// `buildSubstitutes` and `exploreForBlocks` are stored here but read by
+/// build/explore logic — real, just cfg-backed.
 const CFG_DEFAULTS: &[(&str, &str)] = &[
-    ("allowBreak", "true"),
-    ("allowSprint", "true"),
-    ("allowPlace", "true"),
-    ("allowParkour", "true"),
-    ("allowDiagonalAscend", "false"),
-    ("allowDiagonalDescend", "false"),
-    ("allowDownward", "true"),
     ("allowInventory", "false"),
-    ("allowVines", "true"),
-    ("allowWalkOnBottomSlab", "true"),
-    ("assumeStep", "false"),
     ("buildIgnoreBlocks", ""),
     ("buildSubstitutes", ""),
     ("breakFromAbove", "false"),
@@ -44,9 +38,7 @@ const CFG_DEFAULTS: &[(&str, &str)] = &[
     ("exploreForBlocks", "true"),
     ("freeLook", "true"),
     ("renderCachedChunks", "false"),
-    ("sprintInWater", "true"),
     ("strictDirectionCheck", "false"),
-    ("toolSelect", "true"),
     ("yLevelBoxSize", "4"),
 ];
 
@@ -136,6 +128,14 @@ fn defaults() -> rt::Settings {
         mob_avoid_r: 0,
         mob_avoid_c: 1.5,
         parkour_place: false,
+        downward: true,
+        vines: true,
+        diag_ascend: false,
+        diag_descend: false,
+        assume_step: false,
+        sprint_water: true,
+        tool_select: true,
+        bottom_slab: true,
         pause: false,
     }
 }
@@ -743,6 +743,30 @@ fn modified(game: &mut Game<'_>) {
     if cur.mob_avoid_c != d.mob_avoid_c {
         lines.push(format!("mobAvoidanceCoefficient = {}", cur.mob_avoid_c));
     }
+    if cur.downward != d.downward {
+        lines.push(format!("allowDownward = {}", cur.downward));
+    }
+    if cur.vines != d.vines {
+        lines.push(format!("allowVines = {}", cur.vines));
+    }
+    if cur.diag_ascend != d.diag_ascend {
+        lines.push(format!("allowDiagonalAscend = {}", cur.diag_ascend));
+    }
+    if cur.diag_descend != d.diag_descend {
+        lines.push(format!("allowDiagonalDescend = {}", cur.diag_descend));
+    }
+    if cur.assume_step != d.assume_step {
+        lines.push(format!("assumeStep = {}", cur.assume_step));
+    }
+    if cur.sprint_water != d.sprint_water {
+        lines.push(format!("sprintInWater = {}", cur.sprint_water));
+    }
+    if cur.tool_select != d.tool_select {
+        lines.push(format!("toolSelect = {}", cur.tool_select));
+    }
+    if cur.bottom_slab != d.bottom_slab {
+        lines.push(format!("allowWalkOnBottomSlab = {}", cur.bottom_slab));
+    }
     if cur.pause != d.pause {
         lines.push(format!("pause = {}", cur.pause));
     }
@@ -818,6 +842,39 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
                 d.mob_avoid_c.to_string(),
                 "mobAvoidanceCoefficient",
             ),
+            "downward" | "allowdownward" | "allow_downward" => {
+                ("downward", d.downward.to_string(), "allowDownward")
+            }
+            "vines" | "allowvines" => ("vines", d.vines.to_string(), "allowVines"),
+            "diagascend" | "allowdiagonalascend" | "diagonalascend" => (
+                "diag_ascend",
+                d.diag_ascend.to_string(),
+                "allowDiagonalAscend",
+            ),
+            "diagdescend" | "allowdiagonaldescend" | "diagonaldescend" => (
+                "diag_descend",
+                d.diag_descend.to_string(),
+                "allowDiagonalDescend",
+            ),
+            "assumestep" | "step" => {
+                ("assume_step", d.assume_step.to_string(), "assumeStep")
+            }
+            "sprintinwater" | "sprintwater" => {
+                ("sprint_water", d.sprint_water.to_string(), "sprintInWater")
+            }
+            "toolselect" | "autotool" => {
+                ("tool_select", d.tool_select.to_string(), "toolSelect")
+            }
+            "allowwalkonbottomslab" | "bottomslab" => (
+                "bottom_slab",
+                d.bottom_slab.to_string(),
+                "allowWalkOnBottomSlab",
+            ),
+            "maxfallheight" | "maxfallheightnowater" | "fallheight" => (
+                "max_drop",
+                d.max_drop.to_string(),
+                "maxFallHeightNoWater",
+            ),
             "pause" => {
                 rt::with(|s| s.set.pause = false);
                 return Some("pause");
@@ -839,6 +896,14 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
         "parkour_place" => rt::with(|s| s.set.parkour_place = d.parkour_place),
         "mob_avoid_r" => rt::with(|s| s.set.mob_avoid_r = d.mob_avoid_r),
         "mob_avoid_c" => rt::with(|s| s.set.mob_avoid_c = d.mob_avoid_c),
+        "downward" => rt::with(|s| s.set.downward = d.downward),
+        "vines" => rt::with(|s| s.set.vines = d.vines),
+        "diag_ascend" => rt::with(|s| s.set.diag_ascend = d.diag_ascend),
+        "diag_descend" => rt::with(|s| s.set.diag_descend = d.diag_descend),
+        "assume_step" => rt::with(|s| s.set.assume_step = d.assume_step),
+        "sprint_water" => rt::with(|s| s.set.sprint_water = d.sprint_water),
+        "tool_select" => rt::with(|s| s.set.tool_select = d.tool_select),
+        "bottom_slab" => rt::with(|s| s.set.bottom_slab = d.bottom_slab),
         _ => rt::with(|s| s.set.mine_radius = d.mine_radius),
     }
     game.native_set_setting(rt::MOD_ID, k, &v);
@@ -951,6 +1016,39 @@ fn set_real(game: &mut Game<'_>, key: &str, val: Option<&str>) -> bool {
             };
             rt::with(|s| s.set.mob_avoid_c = v.clamp(0.0, 100.0));
         }
+        "downward" | "allowdownward" | "allow_downward" => {
+            rt::with(|s| s.set.downward = flip(s.set.downward, val))
+        }
+        "vines" | "allowvines" => {
+            rt::with(|s| s.set.vines = flip(s.set.vines, val))
+        }
+        "diagascend" | "allowdiagonalascend" | "diagonalascend" => {
+            rt::with(|s| s.set.diag_ascend = flip(s.set.diag_ascend, val))
+        }
+        "diagdescend" | "allowdiagonaldescend" | "diagonaldescend" => {
+            rt::with(|s| s.set.diag_descend = flip(s.set.diag_descend, val))
+        }
+        "assumestep" | "step" => {
+            rt::with(|s| s.set.assume_step = flip(s.set.assume_step, val))
+        }
+        "sprintinwater" | "sprintwater" => {
+            rt::with(|s| s.set.sprint_water = flip(s.set.sprint_water, val))
+        }
+        "toolselect" | "autotool" => {
+            rt::with(|s| s.set.tool_select = flip(s.set.tool_select, val))
+        }
+        "allowwalkonbottomslab" | "bottomslab" => {
+            rt::with(|s| s.set.bottom_slab = flip(s.set.bottom_slab, val))
+        }
+        // Upstream's fall-height names share our maxDrop.
+        "maxfallheight" | "maxfallheightnowater" | "fallheight" => {
+            let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) else {
+                let cur = rt::with(|s| s.set.max_drop);
+                say(game, &format!("maxFallHeightNoWater = {cur}"));
+                return true;
+            };
+            rt::with(|s| s.set.max_drop = v.clamp(1, 20));
+        }
         // `blocksToAvoid` as a comma list is the same data as `/b avoid`.
         "blockstoavoid" | "avoid" => {
             let Some(v) = val else {
@@ -990,7 +1088,7 @@ fn set_real(game: &mut Game<'_>, key: &str, val: Option<&str>) -> bool {
     save_settings(game);
     let text = rt::with(|s| {
         format!(
-            "sprint={} break={} place={} parkour={} parkourPlace={} drop={} radius={} drops={} exposed={} followR={} legit={} water={} lava={} mobR={} mobC={}",
+            "sprint={} break={} place={} parkour={} parkourPlace={} drop={} radius={} drops={} exposed={} followR={} legit={} water={} lava={} mobR={} mobC={} down={} vines={} dAsc={} dDesc={} step={} sprintW={} tool={} slab={}",
             s.set.sprint,
             s.set.allow_break,
             s.set.allow_place,
@@ -1006,6 +1104,14 @@ fn set_real(game: &mut Game<'_>, key: &str, val: Option<&str>) -> bool {
             s.set.assume_lava,
             s.set.mob_avoid_r,
             s.set.mob_avoid_c,
+            s.set.downward,
+            s.set.vines,
+            s.set.diag_ascend,
+            s.set.diag_descend,
+            s.set.assume_step,
+            s.set.sprint_water,
+            s.set.tool_select,
+            s.set.bottom_slab,
         )
     });
     say(game, &text);
@@ -1036,6 +1142,14 @@ fn set_cmd(game: &mut Game<'_>, args: &[&str]) {
             &format!(
                 "assumeWalkOnWater={} assumeWalkOnLava={} mobAvoidanceRadius={} mobAvoidanceCoefficient={}",
                 cur.assume_water, cur.assume_lava, cur.mob_avoid_r, cur.mob_avoid_c
+            ),
+        );
+        say(
+            game,
+            &format!(
+                "allowDownward={} allowVines={} allowDiagonalAscend={} allowDiagonalDescend={} assumeStep={} sprintInWater={} toolSelect={} allowWalkOnBottomSlab={}",
+                cur.downward, cur.vines, cur.diag_ascend, cur.diag_descend,
+                cur.assume_step, cur.sprint_water, cur.tool_select, cur.bottom_slab
             ),
         );
         let mut cfgs: Vec<(String, String)> =

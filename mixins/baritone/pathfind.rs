@@ -65,6 +65,19 @@ pub struct Opts {
     /// ParkourPlace) only exist while the hotbar holds a placeable block,
     /// so the planner can't route over terrain it can't build on.
     pub has_throwaway: bool,
+    /// `allowDownward`: Drop edges and digging through the floor. Off pins
+    /// routes to one elevation band.
+    pub downward: bool,
+    /// `allowVines`: ladder/vine/scaffold climbing.
+    pub vines: bool,
+    /// `allowDiagonalAscend`/`allowDiagonalDescend`: Step/Drop edges on
+    /// diagonal directions. Off by default like upstream.
+    pub diag_ascend: bool,
+    pub diag_descend: bool,
+    /// `assumeStep`: Step edges cost like walking.
+    pub assume_step: bool,
+    /// `sprintInWater`: swimming keeps sprint speed.
+    pub sprint_water: bool,
 }
 
 /// Read-only world facts the planner needs, borrowing from `Game`.
@@ -100,10 +113,17 @@ impl W<'_> {
     }
 
     /// The block at `p` can hold weight: full collision, or a slab/stairs
-    /// (all halves accepted — slightly generous for top slabs).
+    /// while `allowWalkOnBottomSlab` is on (all halves accepted — slightly
+    /// generous for top slabs).
     fn block_solid(&self, p: [i32; 3]) -> bool {
         let f = self.fat(p);
-        f.full_collision || f.name.contains("slab") || f.name.contains("stairs")
+        if f.full_collision {
+            return true;
+        }
+        if !f.name.contains("slab") && !f.name.contains("stairs") {
+            return false;
+        }
+        crate::game::umbx_baritone::with(|s| s.set.bottom_slab)
     }
 
     /// Something solid to stand on under `p`. `assumeWalkOnWater` /
@@ -209,7 +229,9 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
     // Vertical moves first: ladder, pillar, drop of any depth.
     let up = [p[0], p[1] + 1, p[2]];
     if w.body_open(up) {
-        if w.climbable(p) || w.climbable([p[0], p[1] - 1, p[2]]) || w.climbable(up) {
+        if o.vines
+            && (w.climbable(p) || w.climbable([p[0], p[1] - 1, p[2]]) || w.climbable(up))
+        {
             out.push(Move {
                 pos: up,
                 kind: Kind::Ladder { n: 1 },
@@ -224,7 +246,7 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
             });
         }
     }
-    if w.climbable(p) {
+    if o.vines && w.climbable(p) {
         // Climb back down the ladder.
         let down = [p[0], p[1] - 1, p[2]];
         if w.climbable(down) || w.open_cell(down) {
@@ -238,8 +260,8 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
     // Downward: dig straight through the floor we stand on and drop in. The
     // cell below must be landable — solid-but-breakable, or an open shaft
     // that bottoms out inside max_drop. Never into lava, never through
-    // unbreakable.
-    if o.allow_break && w.floor(p) {
+    // unbreakable. `allowDownward` pins routes to one elevation band.
+    if o.downward && o.allow_break && w.floor(p) {
         let fc = [p[0], p[1] - 1, p[2]];
         let below = [p[0], p[1] - 2, p[2]];
         let below_ok = if w.open_cell(below) {
@@ -274,7 +296,7 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
     // to max_drop*3) only when the fall ends in water; dry falls worth
     // >=10hp damage are skipped. Skipped in water: no floor there means
     // open depth, and "dropping" to the lakebed is drowning, not a move.
-    if !w.floor(p) && !w.water(p) {
+    if o.downward && !w.floor(p) && !w.water(p) {
         let bound = o.max_drop * 3;
         let mut d = 1;
         while d <= bound {
@@ -354,9 +376,12 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
             });
             continue;
         }
-        // Step up onto a 1-block ledge.
+        // Step up onto a 1-block ledge. Diagonals need allowDiagonalAscend.
         let up1 = [n[0], n[1] + 1, n[2]];
-        if w.standable(up1) && w.open_cell([p[0], p[1] + 2, p[2]]) {
+        if w.standable(up1)
+            && w.open_cell([p[0], p[1] + 2, p[2]])
+            && (!diag || o.diag_ascend)
+        {
             out.push(Move {
                 pos: up1,
                 kind: Kind::Step,
@@ -365,7 +390,9 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
             continue;
         }
         // Drop down the ledge: past max_drop only into water (see above).
-        if w.body_open(n) {
+        // allowDownward pins routes to one band; diagonals need
+        // allowDiagonalDescend.
+        if o.downward && (!diag || o.diag_descend) && w.body_open(n) {
             let bound = o.max_drop * 3;
             let mut d = 1;
             while d <= bound {
@@ -644,7 +671,9 @@ pub fn find_partial(
             }
             let mut edge = match m.kind {
                 Kind::Walk => if (m.pos[0] - p[0]).abs() + (m.pos[2] - p[2]).abs() == 2 { 1.42 } else { 1.0 },
-                Kind::Step => 2.0,
+                // `assumeStep` makes a 1-up step cost like a walk — just
+                // above flat cost so a truly flat neighbour still wins.
+                Kind::Step => if o.assume_step { 1.05 } else { 2.0 },
                 Kind::Drop { n } => {
                     // A fall through water has no damage cost.
                     let wet = (m.pos[1]..p[1])
@@ -658,7 +687,8 @@ pub fn find_partial(
                 Kind::Parkour { gap } => 2.0 + gap as f64,
                 Kind::ParkourPlace { gap } => 4.5 + gap as f64,
                 Kind::Ladder { .. } => 1.8,
-                Kind::Swim => 2.2,
+                // `sprintInWater` off: no sprint-gliding, water legs cost more.
+                Kind::Swim => if o.sprint_water { 2.2 } else { 4.4 },
                 Kind::Break { .. } => 1.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Downward => 2.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Pillar => 3.5,

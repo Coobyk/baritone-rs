@@ -35,6 +35,12 @@ const ACT_TIMEOUT: u32 = 60;
 /// Ticks without movement before re-planning / dropping a job.
 const REPLAN_TICKS: u32 = 40;
 const STUCK_TICKS: u32 = 120;
+/// A radius-96 scan walks ~160k cells — hold off at least this long after
+/// one so a drained queue in leaf-litter terrain doesn't rescan per tick.
+const SCAN_CD: u32 = 30;
+/// Keep only this many nearest jobs: the far tail of a big scan is what
+/// takes all the time, and the near half is what actually gets worked.
+const JOBS_CAP: usize = 256;
 
 /// Crop block names we harvest (substring-matched on `StateFacts::name`).
 const CROPS: [&str; 8] = [
@@ -90,6 +96,8 @@ struct Farm {
     act: u32,
     stuck: u32,
     last_pos: [i32; 3],
+    /// Ticks until the next rescan is allowed (`scan` is expensive).
+    scan_cd: u32,
 }
 
 impl Farm {
@@ -105,6 +113,7 @@ impl Farm {
             act: 0,
             stuck: 0,
             last_pos: [i32::MIN; 3],
+            scan_cd: 0,
         }
     }
 
@@ -149,16 +158,7 @@ fn say(game: &mut crate::game::Game<'_>, m: &str) {
 }
 
 fn opts(s: &rt::State) -> pf::Opts {
-    pf::Opts {
-        allow_break: s.set.allow_break,
-        allow_place: s.set.allow_place,
-        allow_parkour: s.set.allow_parkour,
-        max_drop: s.set.max_drop,
-        mob_avoid_r: s.set.mob_avoid_r as f64,
-        mob_avoid_c: s.set.mob_avoid_c,
-        parkour_place: s.set.parkour_place,
-        has_throwaway: s.has_throwaway,
-    }
+    rt::opts(s)
 }
 
 /// Where the player can path from: their cell, else the nearest standable.
@@ -253,9 +253,12 @@ fn equipped(game: &crate::game::Game<'_>, job: Job) -> bool {
     }
 }
 
-fn open_above(game: &crate::game::Game<'_>, cell: [i32; 3]) -> bool {
-    let w = pf::W { game };
-    w.open_cell([cell[0], cell[1] + 1, cell[2]])
+/// The cell above `cell` is strictly air. Till/Replant need this rather
+/// than `open_cell`: vanilla's use-action hits the plant on top (tall
+/// grass, leaf litter), never the soil face — counting those cells as
+/// jobs buried forests in unreachable till work.
+fn air_above(game: &crate::game::Game<'_>, cell: [i32; 3]) -> bool {
+    block_name(game, [cell[0], cell[1] + 1, cell[2]]).contains("air")
 }
 
 /// Does the job still need doing? Also the completion check: a Harvest job
@@ -269,11 +272,11 @@ fn valid(game: &crate::game::Game<'_>, job: Job) -> bool {
             // collision, so `open_cell` alone can't see the planting.
             let above = [job.cell[0], job.cell[1] + 1, job.cell[2]];
             block_name(game, job.cell).contains("farmland")
-                && open_above(game, job.cell)
+                && air_above(game, job.cell)
                 && !crop(block_name(game, above))
         }
         Kind::Till => {
-            tillable(block_name(game, job.cell)) && open_above(game, job.cell)
+            tillable(block_name(game, job.cell)) && air_above(game, job.cell)
         }
     }
 }
@@ -297,7 +300,6 @@ fn scan(game: &crate::game::Game<'_>) -> usize {
     let (radius, skip) = with(|s| (s.radius, s.skip.clone()));
     let seeds = seed_slot(game).is_some();
     let hoe = hoe_slot(game).is_some();
-    let w = pf::W { game };
     let (min_y, max_y) = (game.world.shape.min_y, game.world.shape.max_y());
     let mut jobs: Vec<(f64, Job)> = Vec::new();
     for dx in -radius..=radius {
@@ -316,13 +318,13 @@ fn scan(game: &crate::game::Game<'_>) -> usize {
                         if !skip.contains(&j) {
                             jobs.push((d2, j));
                         }
-                    } else if seeds && w.open_cell(above) {
+                    } else if seeds && block_name(game, above).contains("air") {
                         let j = Job { kind: Kind::Replant, cell: p };
                         if !skip.contains(&j) {
                             jobs.push((d2, j));
                         }
                     }
-                } else if hoe && tillable(name) && w.open_cell(above) {
+                } else if hoe && tillable(name) && block_name(game, above).contains("air") {
                     let j = Job { kind: Kind::Till, cell: p };
                     if !skip.contains(&j) {
                         jobs.push((d2, j));
@@ -331,10 +333,11 @@ fn scan(game: &crate::game::Game<'_>) -> usize {
             }
         }
     }
-    let n = jobs.len();
-    // Nearest-first: sort ascending by distance, store reversed so `pop`
-    // takes the closest job.
+    // Nearest-first: sort ascending by distance, keep the closest
+    // JOBS_CAP, store reversed so `pop` takes the closest job.
     jobs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    jobs.truncate(JOBS_CAP);
+    let n = jobs.len();
     with(|s| {
         s.jobs = jobs.into_iter().map(|(_, j)| j).rev().collect();
     });
@@ -361,6 +364,19 @@ fn advance(game: &mut crate::game::Game<'_>) {
                 return;
             }
             None => {
+                // Rescans are the expensive part of farming; on cooldown
+                // the queue just stays empty for a few ticks.
+                if with(|s| {
+                    if s.scan_cd > 0 {
+                        s.scan_cd -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    return;
+                }
+                with(|s| s.scan_cd = SCAN_CD);
                 if scan(game) == 0 {
                     say(game, "farm done");
                     stop(game);

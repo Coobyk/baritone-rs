@@ -214,16 +214,7 @@ fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
 }
 
 fn opts(s: &rt::State) -> pf::Opts {
-    pf::Opts {
-        allow_break: s.set.allow_break,
-        allow_place: s.set.allow_place,
-        allow_parkour: s.set.allow_parkour,
-        max_drop: s.set.max_drop,
-        mob_avoid_r: s.set.mob_avoid_r as f64,
-        mob_avoid_c: s.set.mob_avoid_c,
-        parkour_place: s.set.parkour_place,
-        has_throwaway: s.has_throwaway,
-    }
+    rt::opts(s)
 }
 
 // ---------------------------------------------------------------------------

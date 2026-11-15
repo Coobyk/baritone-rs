@@ -117,16 +117,7 @@ fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
 }
 
 fn opts(s: &rt::State) -> pf::Opts {
-    pf::Opts {
-        allow_break: s.set.allow_break,
-        allow_place: s.set.allow_place,
-        allow_parkour: s.set.allow_parkour,
-        max_drop: s.set.max_drop,
-        mob_avoid_r: s.set.mob_avoid_r as f64,
-        mob_avoid_c: s.set.mob_avoid_c,
-        parkour_place: s.set.parkour_place,
-        has_throwaway: s.has_throwaway,
-    }
+    rt::opts(s)
 }
 
 /// `native_mods`: the mod list entry.
@@ -253,7 +244,7 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
         Some("goto" | "g") => goto(game, &args[1..]),
         Some("mine" | "m") => mine(game, &args[1..]),
         Some("follow" | "f") => follow(game, &args[1..]),
-        Some("explore" | "e") => explore(game),
+        Some("explore" | "e") => explore(game, &args[1..]),
         Some("tunnel" | "t") => tunnel(game, &args[1..]),
         Some("thisway") => thisway(game, &args[1..]),
         Some("axis") => axis(game),
@@ -450,12 +441,30 @@ fn follow(game: &mut Game<'_>, args: &[&str]) {
     }
 }
 
-fn explore(game: &mut Game<'_>) {
+fn explore(game: &mut Game<'_>, args: &[&str]) {
+    // Upstream `explore [filter...]`: with block names (and the stored
+    // `exploreForBlocks` setting on), explore walks toward matching blocks
+    // in columns not yet visited instead of purely random points.
+    let names: Vec<String> = args
+        .iter()
+        .flat_map(|a| a.split(','))
+        .map(|n| n.trim_start_matches("minecraft:").to_ascii_lowercase())
+        .filter(|n| !n.is_empty())
+        .collect();
+    let filtered = !names.is_empty()
+        && crate::game::umbx_baritone_extras::cfg_get("exploreForBlocks")
+            .map(|v| v == "true")
+            .unwrap_or(true);
     rt::with(|s| {
         s.visited.clear();
+        s.explore_names = if filtered { names.clone() } else { Vec::new() };
         s.begin(rt::Proc::Explore);
     });
-    say(game, "exploring");
+    if filtered {
+        say(game, &format!("exploring for {}", names.join(", ")));
+    } else {
+        say(game, "exploring");
+    }
 }
 
 fn tunnel(game: &mut Game<'_>, args: &[&str]) {
@@ -702,7 +711,9 @@ pub(super) fn tick(game: &mut Game<'_>) {
     }
     // Note: `rt::load` takes the state lock itself — never nest it inside
     // `rt::with` (std Mutex is not reentrant; that deadlocks the tick).
-    for k in ["sprint", "allow_break", "allow_place", "allow_parkour", "max_drop", "mine_radius", "mine_scan_drops"] {
+    // Every persisted key reloads here — reading only the originals used to
+    // silently revert the newer settings on every restart.
+    for k in rt::KEYS {
         if let Some(v) = game.native_setting(rt::MOD_ID, k) {
             rt::load(k, &v);
         }
@@ -1287,14 +1298,73 @@ fn follow_step(game: &mut Game<'_>) {
     }
 }
 
-/// Explore: walk to random unvisited columns.
+/// Explore: walk to random unvisited columns — or, with `/b explore
+/// <block>` (exploreForBlocks), toward the nearest matching block in a
+/// column not yet visited.
 fn explore_step(game: &mut Game<'_>) {
-    if rt::with(|s| s.objective.is_some()) {
-        return;
-    }
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
+    // Reached the current point: clear it so the next leg is picked. The
+    // driver otherwise keeps replanning an empty path to the same cell
+    // until the stuck watchdog fires — explore stalled ~6s after every
+    // arrival before this check existed.
+    if let Some(obj) = rt::with(|s| s.objective) {
+        if (obj[0] - me[0]).abs() <= 1
+            && (obj[1] - me[1]).abs() <= 3
+            && (obj[2] - me[2]).abs() <= 1
+        {
+            rt::with(|s| {
+                s.objective = None;
+                s.path.clear();
+                s.at = 0;
+            });
+        } else {
+            return;
+        }
+    }
     let w = pf::W { game };
+    let names = rt::with(|s| s.explore_names.clone());
+    if !names.is_empty() {
+        // Nearest matching block with a standable face-adjacent cell in a
+        // column we haven't visited yet.
+        let mut best: Option<(i32, [i32; 3])> = None;
+        for dx in -32..=32 {
+            for dz in -32..=32 {
+                for dy in -8i32..=8 {
+                    let p = [me[0] + dx, me[1] + dy, me[2] + dz];
+                    if p[1] < game.world.shape.min_y || p[1] > game.world.shape.max_y() {
+                        continue;
+                    }
+                    let f = game.res.facts().get(game.world.block(p[0], p[1], p[2]));
+                    if !names.iter().any(|n| f.name.contains(n.as_str())) {
+                        continue;
+                    }
+                    for off in
+                        [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]
+                    {
+                        let c = [p[0] + off[0], p[1] + off[1], p[2] + off[2]];
+                        if !w.standable(c)
+                            || rt::with(|s| s.visited.contains(&(c[0], c[2])))
+                        {
+                            continue;
+                        }
+                        let d = dx.abs() + dy.abs() + dz.abs();
+                        if best.map_or(true, |(b, _)| d < b) {
+                            best = Some((d, c));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, g)) = best {
+            rt::with(|s| {
+                s.visited.insert((g[0], g[2]));
+                s.objective = Some(g);
+            });
+            return;
+        }
+        // None in range: wander randomly — new terrain may hold one.
+    }
     for _ in 0..24 {
         let (dx, dz) = rt::with(|s| {
             let a = s.next();

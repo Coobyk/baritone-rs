@@ -79,6 +79,24 @@ pub struct Settings {
     /// `allowParkourPlace`: jump gaps whose landing floor is missing by
     /// placing it mid-flight. Risky; off by default like upstream.
     pub parkour_place: bool,
+    /// `allowDownward`: descend more than one block at a time — Drop edges
+    /// and digging through the floor. Off keeps routes on one band.
+    pub downward: bool,
+    /// `allowVines`: climb ladder/vine/scaffold columns.
+    pub vines: bool,
+    /// `allowDiagonalAscend`: Step edges on diagonal directions.
+    pub diag_ascend: bool,
+    /// `allowDiagonalDescend`: Drop edges on diagonal directions.
+    pub diag_descend: bool,
+    /// `assumeStep`: a 1-block ledge costs like walking — the planner
+    /// assumes a step-up assist is in play.
+    pub assume_step: bool,
+    /// `sprintInWater`: keep sprint while swimming (faster crossing).
+    pub sprint_water: bool,
+    /// `toolSelect`: switch to the best hotbar tool while breaking.
+    pub tool_select: bool,
+    /// `allowWalkOnBottomSlab`: slabs/stairs count as floors.
+    pub bottom_slab: bool,
     pub pause: bool,
 }
 
@@ -146,6 +164,9 @@ pub struct State {
     pub set: Settings,
     /// Explored-points memory so `explore` doesn't repeat itself.
     pub visited: std::collections::HashSet<(i32, i32)>,
+    /// `/b explore <block...>` (exploreForBlocks): walk toward matching
+    /// blocks in columns not yet visited.
+    pub explore_names: Vec<String>,
     /// Xorshift rng for explore.
     pub rng: u64,
     /// Diagnostic: why the last plan/stale-check did what it did.
@@ -210,10 +231,19 @@ impl State {
                 mob_avoid_r: 0,
                 mob_avoid_c: 1.5,
                 parkour_place: false,
+                downward: true,
+                vines: true,
+                diag_ascend: false,
+                diag_descend: false,
+                assume_step: false,
+                sprint_water: true,
+                tool_select: true,
+                bottom_slab: true,
                 mine_scan_drops: true,
                 pause: false,
             },
             visited: std::collections::HashSet::new(),
+            explore_names: Vec::new(),
             rng: 0x9e3779b97f4a7c15,
             note: String::new(),
             click_left: 0,
@@ -302,6 +332,14 @@ pub fn load(name: &str, value: &str) {
                 set.mob_avoid_c = value.parse::<f64>().unwrap_or(1.5).clamp(0.0, 100.0)
             }
             "parkour_place" => set.parkour_place = value == "true",
+            "downward" => set.downward = value == "true",
+            "vines" => set.vines = value == "true",
+            "diag_ascend" => set.diag_ascend = value == "true",
+            "diag_descend" => set.diag_descend = value == "true",
+            "assume_step" => set.assume_step = value == "true",
+            "sprint_water" => set.sprint_water = value == "true",
+            "tool_select" => set.tool_select = value == "true",
+            "bottom_slab" => set.bottom_slab = value == "true",
             _ => {}
         }
     });
@@ -326,6 +364,63 @@ pub fn to_save() -> Vec<(&'static str, String)> {
             ("mob_avoid_r", s.set.mob_avoid_r.to_string()),
             ("mob_avoid_c", s.set.mob_avoid_c.to_string()),
             ("parkour_place", s.set.parkour_place.to_string()),
+            ("downward", s.set.downward.to_string()),
+            ("vines", s.set.vines.to_string()),
+            ("diag_ascend", s.set.diag_ascend.to_string()),
+            ("diag_descend", s.set.diag_descend.to_string()),
+            ("assume_step", s.set.assume_step.to_string()),
+            ("sprint_water", s.set.sprint_water.to_string()),
+            ("tool_select", s.set.tool_select.to_string()),
+            ("bottom_slab", s.set.bottom_slab.to_string()),
         ]
     })
+}
+
+/// Every persisted setting key — the tick reloads them all so a value
+/// written via `/b set` survives restarts and edits take effect live.
+pub const KEYS: &[&str] = &[
+    "sprint",
+    "allow_break",
+    "allow_place",
+    "allow_parkour",
+    "max_drop",
+    "mine_radius",
+    "mine_scan_drops",
+    "exposed_ores",
+    "follow_radius",
+    "legit_mine",
+    "assume_water",
+    "assume_lava",
+    "mob_avoid_r",
+    "mob_avoid_c",
+    "parkour_place",
+    "downward",
+    "vines",
+    "diag_ascend",
+    "diag_descend",
+    "assume_step",
+    "sprint_water",
+    "tool_select",
+    "bottom_slab",
+];
+
+/// Planner flags every module shares — one site so a new setting can't
+/// drift between drivers.
+pub fn opts(s: &State) -> crate::game::umbx_pathfind::Opts {
+    crate::game::umbx_pathfind::Opts {
+        allow_break: s.set.allow_break,
+        allow_place: s.set.allow_place,
+        allow_parkour: s.set.allow_parkour,
+        max_drop: s.set.max_drop,
+        mob_avoid_r: s.set.mob_avoid_r as f64,
+        mob_avoid_c: s.set.mob_avoid_c,
+        parkour_place: s.set.parkour_place,
+        has_throwaway: s.has_throwaway,
+        downward: s.set.downward,
+        vines: s.set.vines,
+        diag_ascend: s.set.diag_ascend,
+        diag_descend: s.set.diag_descend,
+        assume_step: s.set.assume_step,
+        sprint_water: s.set.sprint_water,
+    }
 }
