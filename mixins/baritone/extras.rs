@@ -892,7 +892,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
         "eta" => eta(game),
         // env!("CARGO_PKG_VERSION") would resolve to the *host* crate's
         // version once injected, so the port's own version is hardcoded.
-        "version" | "ver" => say(game, "baritone-rs 0.3.21 for Horizon 9f42064"),
+        "version" | "ver" => say(game, "baritone-rs 0.4.0 for Horizon 9f42064"),
         "gc" => say(game, "gc: nothing to collect (no-op)"),
         "reloadall" => say(game, "reloadall: nothing to reload (no-op)"),
         "saveall" => {
