@@ -57,6 +57,12 @@ pub struct Settings {
     pub mine_radius: i32,
     /// `mineScanDroppedItems`: walk to dropped items matching a mine target.
     pub mine_scan_drops: bool,
+    /// `allowOnlyExposedOres`: mine targets need at least one face-adjacent
+    /// open cell (no x-ray-style mining through walls).
+    pub exposed_ores: bool,
+    /// `followRadius`: follow's goal re-paths only once the mob is further
+    /// than this many cells from the last objective.
+    pub follow_radius: i32,
     pub pause: bool,
 }
 
@@ -168,6 +174,8 @@ impl State {
                 allow_parkour: true,
                 max_drop: 4,
                 mine_radius: 32,
+                exposed_ores: false,
+                follow_radius: 3,
                 mine_scan_drops: true,
                 pause: false,
             },
@@ -247,6 +255,8 @@ pub fn load(name: &str, value: &str) {
             "max_drop" => set.max_drop = value.parse().unwrap_or(4).clamp(1, 20),
             "mine_radius" => set.mine_radius = value.parse().unwrap_or(32).clamp(8, 96),
             "mine_scan_drops" => set.mine_scan_drops = value == "true",
+            "exposed_ores" => set.exposed_ores = value == "true",
+            "follow_radius" => set.follow_radius = value.parse().unwrap_or(3).clamp(0, 32),
             _ => {}
         }
     });
@@ -263,6 +273,8 @@ pub fn to_save() -> Vec<(&'static str, String)> {
             ("max_drop", s.set.max_drop.to_string()),
             ("mine_radius", s.set.mine_radius.to_string()),
             ("mine_scan_drops", s.set.mine_scan_drops.to_string()),
+            ("exposed_ores", s.set.exposed_ores.to_string()),
+            ("follow_radius", s.set.follow_radius.to_string()),
         ]
     })
 }

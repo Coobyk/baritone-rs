@@ -128,6 +128,8 @@ fn defaults() -> rt::Settings {
         max_drop: 4,
         mine_radius: 32,
         mine_scan_drops: true,
+        exposed_ores: false,
+        follow_radius: 3,
         pause: false,
     }
 }
@@ -611,6 +613,15 @@ fn modified(game: &mut Game<'_>) {
     if cur.mine_radius != d.mine_radius {
         lines.push(format!("mineRadius = {}", cur.mine_radius));
     }
+    if cur.mine_scan_drops != d.mine_scan_drops {
+        lines.push(format!("mineScanDroppedItems = {}", cur.mine_scan_drops));
+    }
+    if cur.exposed_ores != d.exposed_ores {
+        lines.push(format!("onlyExposedOres = {}", cur.exposed_ores));
+    }
+    if cur.follow_radius != d.follow_radius {
+        lines.push(format!("followRadius = {}", cur.follow_radius));
+    }
     if cur.pause != d.pause {
         lines.push(format!("pause = {}", cur.pause));
     }
@@ -651,6 +662,17 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
             "radius" | "mineradius" | "mine_radius" => {
                 ("mine_radius", d.mine_radius.to_string(), "mineRadius")
             }
+            "drops" | "mine_scan_drops" | "minescandroppeditems" => (
+                "mine_scan_drops",
+                d.mine_scan_drops.to_string(),
+                "mineScanDroppedItems",
+            ),
+            "exposed" | "onlyexposed" | "exposedores" | "allowonlyexposedores" => {
+                ("exposed_ores", d.exposed_ores.to_string(), "onlyExposedOres")
+            }
+            "follow_radius" | "followradius" => {
+                ("follow_radius", d.follow_radius.to_string(), "followRadius")
+            }
             "pause" => {
                 rt::with(|s| s.set.pause = false);
                 return Some("pause");
@@ -663,6 +685,9 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
         "allow_place" => rt::with(|s| s.set.allow_place = d.allow_place),
         "allow_parkour" => rt::with(|s| s.set.allow_parkour = d.allow_parkour),
         "max_drop" => rt::with(|s| s.set.max_drop = d.max_drop),
+        "mine_scan_drops" => rt::with(|s| s.set.mine_scan_drops = d.mine_scan_drops),
+        "exposed_ores" => rt::with(|s| s.set.exposed_ores = d.exposed_ores),
+        "follow_radius" => rt::with(|s| s.set.follow_radius = d.follow_radius),
         _ => rt::with(|s| s.set.mine_radius = d.mine_radius),
     }
     game.native_set_setting(rt::MOD_ID, k, &v);
@@ -733,18 +758,35 @@ fn set_real(game: &mut Game<'_>, key: &str, val: Option<&str>) -> bool {
             };
             rt::with(|s| s.set.mine_radius = v.clamp(8, 96));
         }
+        "drops" | "mine_scan_drops" | "minescandroppeditems" => {
+            rt::with(|s| s.set.mine_scan_drops = flip(s.set.mine_scan_drops, val))
+        }
+        "exposed" | "onlyexposed" | "exposedores" | "allowonlyexposedores" => {
+            rt::with(|s| s.set.exposed_ores = flip(s.set.exposed_ores, val))
+        }
+        "follow_radius" | "followradius" => {
+            let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) else {
+                let cur = rt::with(|s| s.set.follow_radius);
+                say(game, &format!("followRadius = {cur}"));
+                return true;
+            };
+            rt::with(|s| s.set.follow_radius = v.clamp(0, 32));
+        }
         _ => return false,
     }
     save_settings(game);
     let text = rt::with(|s| {
         format!(
-            "sprint={} break={} place={} parkour={} drop={} radius={}",
+            "sprint={} break={} place={} parkour={} drop={} radius={} drops={} exposed={} followR={}",
             s.set.sprint,
             s.set.allow_break,
             s.set.allow_place,
             s.set.allow_parkour,
             s.set.max_drop,
-            s.set.mine_radius
+            s.set.mine_radius,
+            s.set.mine_scan_drops,
+            s.set.exposed_ores,
+            s.set.follow_radius,
         )
     });
     say(game, &text);
@@ -761,6 +803,13 @@ fn set_cmd(game: &mut Game<'_>, args: &[&str]) {
                 "sprint={} allowBreak={} allowPlace={} allowParkour={} maxDrop={} mineRadius={}",
                 cur.sprint, cur.allow_break, cur.allow_place, cur.allow_parkour,
                 cur.max_drop, cur.mine_radius
+            ),
+        );
+        say(
+            game,
+            &format!(
+                "mineScanDroppedItems={} onlyExposedOres={} followRadius={}",
+                cur.mine_scan_drops, cur.exposed_ores, cur.follow_radius
             ),
         );
         let mut cfgs: Vec<(String, String)> =

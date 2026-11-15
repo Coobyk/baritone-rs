@@ -624,6 +624,14 @@ fn set(game: &mut Game<'_>, args: &[&str]) {
         "drops" | "mine_scan_drops" | "minescandroppeditems" => {
             s.set.mine_scan_drops = flip(s.set.mine_scan_drops, val);
         }
+        "exposed" | "onlyexposed" | "exposedores" | "allowonlyexposedores" => {
+            s.set.exposed_ores = flip(s.set.exposed_ores, val);
+        }
+        "follow_radius" | "followradius" => {
+            if let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) {
+                s.set.follow_radius = v.clamp(0, 32);
+            }
+        }
         _ => say(game, &format!("unknown setting {key}")),
     });
     save(game);
@@ -970,16 +978,18 @@ fn driver(game: &mut Game<'_>) {
 /// Mine: keep `s.objective` on the nearest matching block in the radius; a
 /// finished path means the block is gone, so rescan.
 fn mine_step(game: &mut Game<'_>) {
-    let (names, radius, cur, was_drop) = rt::with(|s| {
+    let (names, radius, cur, was_drop, exposed) = rt::with(|s| {
         (
             s.mine_names.clone(),
             s.set.mine_radius,
             s.objective,
             s.drop_pickup,
+            s.set.exposed_ores,
         )
     });
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
+    let w = pf::W { game };
     // If a target is still there and still in scan range, keep it.
     if let Some(t) = cur {
         let in_range = (t[0] - me[0]).abs() <= radius
@@ -1038,6 +1048,24 @@ fn mine_step(game: &mut Game<'_>) {
                 let f = game.res.facts().get(st);
                 if f.hardness < 0.0
                     || crate::game::umbx_baritone_extras::blacklisted(f.name.as_ref())
+                {
+                    continue;
+                }
+                // `allowOnlyExposedOres`: skip cells sealed on all six faces —
+                // a real miner can't have seen them.
+                if exposed
+                    && ![
+                        [1, 0, 0],
+                        [-1, 0, 0],
+                        [0, 0, 1],
+                        [0, 0, -1],
+                        [0, 1, 0],
+                        [0, -1, 0],
+                    ]
+                    .iter()
+                    .any(|o| {
+                        w.open_cell([p[0] + o[0], p[1] + o[1], p[2] + o[2]])
+                    })
                 {
                     continue;
                 }
@@ -1156,7 +1184,8 @@ fn follow_step(game: &mut Game<'_>) {
         Some((_, t)) => {
             let moved = rt::with(|s| {
                 s.objective.map_or(true, |o| {
-                    (o[0] - t[0]).abs() + (o[1] - t[1]).abs() + (o[2] - t[2]).abs() > 3
+                    (o[0] - t[0]).abs() + (o[1] - t[1]).abs() + (o[2] - t[2]).abs()
+                        > s.set.follow_radius
                 })
             });
             if moved {
