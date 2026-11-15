@@ -271,36 +271,57 @@ fn say(game: &mut Game<'_>, m: &str) {
     game.native_chat(&format!("baritone: {m}"));
 }
 
-fn goto(game: &mut Game<'_>, args: &[&str]) {
-    if game.player.is_none() {
-        return;
-    }
-    let ints: Vec<Option<i32>> = args.iter().map(|a| a.parse::<i32>().ok()).collect();
-    let goal = match ints.as_slice() {
-        [Some(x), Some(y), Some(z)] => Some([*x, *y, *z]),
-        [Some(x), Some(z)] => {
-            // GoalXZ: don't resolve the column up-front — it may be far away
-            // and unloaded; any standable cell in it counts on arrival.
-            rt::with(|s| s.begin(rt::Proc::GotoXZ { x: *x, z: *z }));
-            say(game, &format!("going to {x} {z}"));
-            return;
+/// `~`, `~N`, `~-N`, or an absolute int — Baritone's relative coordinate.
+fn coord(a: &str, base: i32) -> Option<i32> {
+    if let Some(rel) = a.strip_prefix('~') {
+        if rel.is_empty() {
+            return Some(base);
         }
-        _ if args.first() == Some(&"y") => match ints.get(1).copied().flatten() {
-            Some(y) => {
+        return rel.parse::<i32>().ok().map(|d| base + d);
+    }
+    a.parse::<i32>().ok()
+}
+
+fn goto(game: &mut Game<'_>, args: &[&str]) {
+    let Some(me) = game.player.as_ref().map(feet) else {
+        return;
+    };
+    let c = |a: &str, i: usize| coord(a, me[i]);
+    let goal = match args {
+        [x, y, z] => match (c(x, 0), c(y, 1), c(z, 2)) {
+            (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+            _ => None,
+        },
+        [x, z] => match (c(x, 0), c(z, 2)) {
+            (Some(x), Some(z)) => {
+                // GoalXZ: don't resolve the column up-front — it may be far
+                // away and unloaded; any standable cell in it counts.
+                rt::with(|s| s.begin(rt::Proc::GotoXZ { x, z }));
+                say(game, &format!("going to {x} {z}"));
+                return;
+            }
+            _ => None,
+        },
+        ["y", y] => {
+            if let Some(y) = c(y, 1) {
                 rt::with(|s| s.begin(rt::Proc::YLevel { y }));
                 say(game, &format!("going to y={y}"));
                 return;
             }
-            None => None,
-        },
+            None
+        }
         _ => None,
     };
-    let Some(goal) = goal else {
-        say(game, "/b goto <x> <z> | <x> <y> <z> | y <y>");
-        return;
-    };
-    rt::with(|s| s.begin(rt::Proc::Goto { goal }));
-    say(game, &format!("going to {} {} {}", goal[0], goal[1], goal[2]));
+    match goal {
+        Some(goal) => {
+            rt::with(|s| s.begin(rt::Proc::Goto { goal }));
+            say(
+                game,
+                &format!("going to {} {} {}", goal[0], goal[1], goal[2]),
+            );
+        }
+        None => say(game, "/b goto <x> <z> | <x> <y> <z> | y <y>"),
+    }
 }
 
 fn mine(game: &mut Game<'_>, args: &[&str]) {
@@ -326,15 +347,33 @@ fn mine(game: &mut Game<'_>, args: &[&str]) {
 }
 
 fn follow(game: &mut Game<'_>, args: &[&str]) {
-    let Some(name) = args.first() else {
-        say(game, "/b follow <entity> — e.g. /b follow zombie");
-        return;
+    // Upstream forms: `follow player <name>`, `follow entity <type>`,
+    // `follow entities`; a bare name keeps the old match-anything form.
+    let (mode, name) = match args {
+        ["player", name] | ["players", name] => (1u8, (*name).to_string()),
+        ["entity", name] | ["entitytype", name] => (2u8, (*name).to_string()),
+        ["entities"] => (3u8, String::new()),
+        [name, ..] => (0u8, (*name).to_string()),
+        [] => {
+            say(
+                game,
+                "/b follow <entity> | player <name> | entity <type> | entities",
+            );
+            return;
+        }
     };
+    let name = name.trim_start_matches("minecraft:").to_ascii_lowercase();
     rt::with(|s| {
-        s.follow_name = name.trim_start_matches("minecraft:").to_ascii_lowercase();
+        s.follow_name = name.clone();
+        s.follow_mode = mode;
         s.begin(rt::Proc::Follow);
     });
-    say(game, &format!("following {name}"));
+    match mode {
+        1 => say(game, &format!("following player {name}")),
+        2 => say(game, &format!("following entity {name}")),
+        3 => say(game, "following entities"),
+        _ => say(game, &format!("following {name}")),
+    }
 }
 
 fn explore(game: &mut Game<'_>) {
@@ -346,7 +385,16 @@ fn explore(game: &mut Game<'_>) {
 }
 
 fn tunnel(game: &mut Game<'_>, args: &[&str]) {
-    let n = args.first().and_then(|a| a.parse::<i32>().ok()).unwrap_or(64).clamp(1, 1024);
+    // Upstream: `tunnel` or `tunnel <height> <width> <length>` all-or-none.
+    // A bare number stays our length shorthand (`tunnel 50` = 1×2 for 50).
+    let ints: Vec<i32> = args.iter().filter_map(|a| a.parse::<i32>().ok()).collect();
+    let (h, w, len) = match ints.as_slice() {
+        [] => (2, 1, 4096),
+        [n] => (2, 1, *n),
+        [h, w] => (*h, *w, 4096),
+        [h, w, l, ..] => (*h, *w, *l),
+    };
+    let (w, h, len) = (w.clamp(1, 5), h.clamp(1, 5), len.clamp(1, 65536));
     let Some(p) = game.player.as_ref() else { return };
     let yaw = p.yaw;
     // Facing cardinal like Baritone's tunnel.
@@ -358,9 +406,10 @@ fn tunnel(game: &mut Game<'_>, args: &[&str]) {
     };
     rt::with(|s| {
         s.tunnel_dir = dir;
-        s.begin(rt::Proc::Tunnel { left: n });
+        s.tunnel_size = [w, h];
+        s.begin(rt::Proc::Tunnel { left: len });
     });
-    say(game, &format!("tunnelling {n} blocks"));
+    say(game, &format!("tunnelling {w}x{h} for {len} blocks"));
 }
 
 /// `spawn`: path to the world spawn (upstream's `spawn` — the level's spawn
@@ -648,6 +697,17 @@ fn driver(game: &mut Game<'_>) {
                             <= 18.0
                 }, true)
             }
+            // A tunnel excavation cell works exactly like a mine target:
+            // stand adjacent, then the appended Break takes it out.
+            rt::Proc::Tunnel { .. } if rt::with(|s| s.excavate) => {
+                pf::find_partial(&w, start, goal, &o, |p, _| {
+                    w.standable(p)
+                        && ((p[0] - goal[0]).pow(2)
+                            + (p[1] - goal[1]).pow(2)
+                            + (p[2] - goal[2]).pow(2)) as f64
+                            <= 18.0
+                }, true)
+            }
             rt::Proc::GotoXZ { .. } => {
                 pf::find_partial(&w, start, goal, &o, |p, g| p[0] == g[0] && p[2] == g[2], true)
             }
@@ -658,8 +718,12 @@ fn driver(game: &mut Game<'_>) {
         };
         match path {
             Some(mut path) => {
-                // Mine: stand near the block, then break the block itself.
-                if matches!(proc, rt::Proc::Mine { .. }) {
+                // Mine (and tunnel excavation cells): stand near the block,
+                // then break the block itself.
+                if matches!(proc, rt::Proc::Mine { .. })
+                    || (matches!(proc, rt::Proc::Tunnel { .. })
+                        && rt::with(|s| s.excavate))
+                {
                     let stand = path.last().map(|m| m.pos).unwrap_or(start);
                     path.push(pf::Move {
                         pos: stand,
@@ -866,7 +930,7 @@ fn follow_step(game: &mut Game<'_>) {
         return;
     }
     rt::with(|s| s.cooldown = 10);
-    let name = rt::with(|s| s.follow_name.clone());
+    let (name, mode) = rt::with(|s| (s.follow_name.clone(), s.follow_mode));
     let Some(me_p) = game.player.as_ref().map(|p| p.position) else { return };
     let mut best: Option<(f64, [i32; 3])> = None;
     for m in &game.mobs {
@@ -884,7 +948,18 @@ fn follow_step(game: &mut Game<'_>) {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !kind.contains(&name) && !custom.contains(&name) {
+        let is_player = kind == "player" || !custom.is_empty();
+        let hit = match mode {
+            // `follow entities`: everything alive.
+            3 => true,
+            // `follow player <name>`: players and named entities.
+            1 => is_player && (name.is_empty() || custom.contains(&name)),
+            // `follow entity <type>`: kind only.
+            2 => kind.contains(&name),
+            // Bare name: kind or custom name contains.
+            _ => kind.contains(&name) || custom.contains(&name),
+        };
+        if !hit {
             continue;
         }
         let d = (m.position.x - me_p.x).powi(2)
@@ -951,27 +1026,119 @@ fn explore_step(game: &mut Game<'_>) {
     rt::with(|s| s.halt());
 }
 
-/// Tunnel: objective is a few columns ahead in the digging direction.
+/// The cells of the tunnel cross-section through column `col` (its feet
+/// cell), nearest-first to `me`: `w` columns wide across the perpendicular,
+/// `h` cells tall.
+fn tunnel_cells(
+    me: [i32; 3],
+    col: [i32; 3],
+    dir: [i32; 2],
+    size: [i32; 2],
+) -> Vec<[i32; 3]> {
+    let [w, h] = size;
+    // Perpendicular in XZ: dir [1,0] digs a Z-wide cross-section and so on.
+    let perp = [dir[1], dir[0]];
+    let mut cells = Vec::with_capacity((w * h).max(1) as usize);
+    for dy in 0..h {
+        for dx in -(w / 2)..=(w - 1 - w / 2) {
+            cells.push([
+                col[0] + dx * perp[0],
+                col[1] + dy,
+                col[2] + dx * perp[1],
+            ]);
+        }
+    }
+    cells.sort_by_key(|c| {
+        (c[0] - me[0]).pow(2) + (c[1] - me[1]).pow(2) + (c[2] - me[2]).pow(2)
+    });
+    cells
+}
+
+/// Tunnel: 1×2 lets the path's own Break moves dig the corridor; a wider
+/// cross-section excavates each column's cells first, then steps in —
+/// `tunnel_col` tracks the intended column so the line stays straight even
+/// if the player is nudged sideways mid-dig.
 fn tunnel_step(game: &mut Game<'_>) {
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
-    let (dir, left) = rt::with(|s| {
+    let (dir, left, size) = rt::with(|s| {
         (
             s.tunnel_dir,
-            if let rt::Proc::Tunnel { left } = s.proc { left } else { 0 },
+            if let rt::Proc::Tunnel { left } = s.proc {
+                left
+            } else {
+                0
+            },
+            s.tunnel_size,
         )
     });
-    if left == 0 {
+    if left <= 0 {
         say(game, "tunnel done");
         rt::with(|s| s.halt());
         return;
     }
-    rt::with(|s| {
-        s.objective = Some([me[0] + dir[0] * 3, me[1], me[2] + dir[1] * 3]);
-        if let rt::Proc::Tunnel { left: l } = s.proc {
-            s.proc = rt::Proc::Tunnel { left: l.saturating_sub(1) };
+    if size == [1, 2] {
+        rt::with(|s| {
+            s.objective = Some([me[0] + dir[0] * 3, me[1], me[2] + dir[1] * 3]);
+            if let rt::Proc::Tunnel { left: l } = s.proc {
+                s.proc = rt::Proc::Tunnel {
+                    left: l.saturating_sub(1),
+                };
+            }
+        });
+        return;
+    }
+    let w = pf::W { game };
+    let col = rt::with(|s| s.tunnel_col);
+    if col == [i32::MIN; 3] {
+        // First step: aim at the column ahead and queue its cross-section.
+        let nxt = [me[0] + dir[0], me[1], me[2] + dir[1]];
+        let cells = tunnel_cells(me, nxt, dir, size);
+        rt::with(|s| {
+            s.tunnel_col = nxt;
+            s.tunnel_queue = cells.into();
+        });
+        return;
+    }
+    // Drop cells already open or undiggable (air, water, lava, bedrock).
+    loop {
+        let front = rt::with(|s| s.tunnel_queue.front().copied());
+        match front {
+            Some(c) if w.open_cell(c) || !w.breakable(c) => {
+                rt::with(|s| {
+                    s.tunnel_queue.pop_front();
+                });
+            }
+            _ => break,
         }
-    });
+    }
+    if rt::with(|s| !s.tunnel_queue.is_empty()) {
+        // Excavate the front cell: the driver paths adjacent and appends a
+        // Break move on it (the Mine arm).
+        rt::with(|s| {
+            s.excavate = true;
+            s.objective = s.tunnel_queue.front().copied();
+        });
+        return;
+    }
+    rt::with(|s| s.excavate = false);
+    if me[0] == col[0] && me[2] == col[2] {
+        // Standing in the excavated column: advance one step on the line.
+        let nxt = [col[0] + dir[0], col[1], col[2] + dir[1]];
+        let cells = tunnel_cells(me, nxt, dir, size);
+        rt::with(|s| {
+            s.tunnel_col = nxt;
+            s.tunnel_queue = cells.into();
+            if let rt::Proc::Tunnel { left: l } = s.proc {
+                s.proc = rt::Proc::Tunnel {
+                    left: l.saturating_sub(1),
+                };
+            }
+        });
+        return;
+    }
+    // Column open, not yet inside: walk in.
+    rt::with(|s| s.objective = Some(col));
 }
 
 /// `native_movement_input`: press the keys the executor asked for.

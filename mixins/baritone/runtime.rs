@@ -64,6 +64,10 @@ pub struct State {
     pub mine_names: Vec<String>,
     /// Follow target: mob kind name or guest name.
     pub follow_name: String,
+    /// `follow` match mode: 0 = kind or name contains, 1 = player names
+    /// only (`follow player`), 2 = kind only (`follow entity`),
+    /// 3 = every living mob (`follow entities`).
+    pub follow_mode: u8,
     /// Current path and progress.
     pub path: Vec<crate::game::umbx_pathfind::Move>,
     pub at: usize,
@@ -76,6 +80,16 @@ pub struct State {
     pub cooldown: u32,
     /// Tunnel's step direction.
     pub tunnel_dir: [i32; 2],
+    /// `tunnel <h> <w>` cross-section size (width × height; 1×2 is the
+    /// plain corridor that lets the path's own Break moves dig).
+    pub tunnel_size: [i32; 2],
+    /// Wide-tunnel excavation: cells of the current column still to dig.
+    pub tunnel_queue: std::collections::VecDeque<[i32; 3]>,
+    /// The column being excavated / walked into (i32::MIN = unset).
+    pub tunnel_col: [i32; 3],
+    /// Objective is an excavation cell: the driver paths adjacent and
+    /// appends a Break move on it, exactly like Mine does.
+    pub excavate: bool,
     /// The process's current target cell (mine block, follow spot, ...).
     pub objective: Option<[i32; 3]>,
     /// A feature module's process is active: the input hook should apply
@@ -105,6 +119,7 @@ impl State {
             proc: Proc::None,
             mine_names: Vec::new(),
             follow_name: String::new(),
+            follow_mode: 0,
             path: Vec::new(),
             at: 0,
             stuck: 0,
@@ -114,6 +129,10 @@ impl State {
             busy: false,
             objective: None,
             tunnel_dir: [0, 0],
+            tunnel_size: [1, 2],
+            tunnel_queue: std::collections::VecDeque::new(),
+            tunnel_col: [i32::MIN; 3],
+            excavate: false,
             want: Want::default(),
             set: Settings {
                 sprint: true,
@@ -157,6 +176,9 @@ impl State {
         self.stuck = 0;
         self.replanned = false;
         self.cooldown = 0;
+        self.excavate = false;
+        self.tunnel_queue.clear();
+        self.tunnel_col = [i32::MIN; 3];
     }
 
     pub fn next(&mut self) -> u64 {
