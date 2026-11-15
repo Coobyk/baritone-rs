@@ -63,6 +63,22 @@ pub struct Settings {
     /// `followRadius`: follow's goal re-paths only once the mob is further
     /// than this many cells from the last objective.
     pub follow_radius: i32,
+    /// `legitMine`: mine only blocks with a clear line of sight from the
+    /// player's eye (or blocks seen before — the seen set persists).
+    pub legit_mine: bool,
+    /// `assumeWalkOnWater`: treat the water surface as solid floor — a
+    /// planner cheat for servers where players can walk on water.
+    pub assume_water: bool,
+    /// `assumeWalkOnLava`: same cheat for lava surfaces.
+    pub assume_lava: bool,
+    /// `mobAvoidanceRadius`: distance under which nearby mobs cost extra
+    /// path weight (0 disables).
+    pub mob_avoid_r: i32,
+    /// `mobAvoidanceCoefficient`: cost multiplier on the proximity term.
+    pub mob_avoid_c: f64,
+    /// `allowParkourPlace`: jump gaps whose landing floor is missing by
+    /// placing it mid-flight. Risky; off by default like upstream.
+    pub parkour_place: bool,
     pub pause: bool,
 }
 
@@ -82,6 +98,10 @@ pub struct State {
     /// Ticks without progress, for the stuck watchdog.
     pub stuck: u32,
     pub last_pos: [i32; 3],
+    /// Closest xz distance seen to the current move's target — progress is
+    /// the number going down, not displacement (bouncing off a ledge and
+    /// walking back used to reset the watchdog forever).
+    pub last_dist: f64,
     /// Re-path once after an unstick jump.
     pub replanned: bool,
     /// Consecutive failed vertical moves: skipping a climb/descent desyncs
@@ -113,6 +133,9 @@ pub struct State {
     pub mine_want: u32,
     /// Objectives completed since `mine` began (block gone, drop picked).
     pub mine_done: u32,
+    /// `legitMine`: cells raycast-verified visible this session. Once seen,
+    /// an ore stays mineable even after it falls out of sight.
+    pub seen_ores: std::collections::HashSet<[i32; 3]>,
     /// The process's current target cell (mine block, follow spot, ...).
     pub objective: Option<[i32; 3]>,
     /// A feature module's process is active: the input hook should apply
@@ -139,6 +162,9 @@ pub struct State {
     pub eat_ticks: u8,
     /// Hunger level when the current bite started (completion = it rose).
     pub eat_food: i32,
+    /// Hotbar has a placeable block — refreshed each tick; the planner only
+    /// emits place moves while this holds (upstream's throwaway check).
+    pub has_throwaway: bool,
 }
 
 impl State {
@@ -152,6 +178,7 @@ impl State {
             at: 0,
             stuck: 0,
             last_pos: [i32::MIN; 3],
+            last_dist: f64::MAX,
             replanned: false,
             vert_fails: 0,
             stale_cd: 0,
@@ -166,6 +193,7 @@ impl State {
             drop_pickup: false,
             mine_want: 0,
             mine_done: 0,
+            seen_ores: std::collections::HashSet::new(),
             want: Want::default(),
             set: Settings {
                 sprint: true,
@@ -176,6 +204,12 @@ impl State {
                 mine_radius: 32,
                 exposed_ores: false,
                 follow_radius: 3,
+                legit_mine: false,
+                assume_water: false,
+                assume_lava: false,
+                mob_avoid_r: 0,
+                mob_avoid_c: 1.5,
+                parkour_place: false,
                 mine_scan_drops: true,
                 pause: false,
             },
@@ -188,6 +222,7 @@ impl State {
             held_r: false,
             eat_ticks: 0,
             eat_food: 20,
+            has_throwaway: true,
         }
     }
 
@@ -202,6 +237,7 @@ impl State {
         self.replanned = false;
         self.vert_fails = 0;
         self.stale_cd = 0;
+        self.last_dist = f64::MAX;
         self.want = Want::default();
         self.set.pause = false;
         self.eat_ticks = 0;
@@ -217,6 +253,7 @@ impl State {
         self.replanned = false;
         self.vert_fails = 0;
         self.stale_cd = 0;
+        self.last_dist = f64::MAX;
         self.cooldown = 0;
         self.excavate = false;
         self.drop_pickup = false;
@@ -257,6 +294,14 @@ pub fn load(name: &str, value: &str) {
             "mine_scan_drops" => set.mine_scan_drops = value == "true",
             "exposed_ores" => set.exposed_ores = value == "true",
             "follow_radius" => set.follow_radius = value.parse().unwrap_or(3).clamp(0, 32),
+            "legit_mine" => set.legit_mine = value == "true",
+            "assume_water" => set.assume_water = value == "true",
+            "assume_lava" => set.assume_lava = value == "true",
+            "mob_avoid_r" => set.mob_avoid_r = value.parse().unwrap_or(0).clamp(0, 32),
+            "mob_avoid_c" => {
+                set.mob_avoid_c = value.parse::<f64>().unwrap_or(1.5).clamp(0.0, 100.0)
+            }
+            "parkour_place" => set.parkour_place = value == "true",
             _ => {}
         }
     });
@@ -275,6 +320,12 @@ pub fn to_save() -> Vec<(&'static str, String)> {
             ("mine_scan_drops", s.set.mine_scan_drops.to_string()),
             ("exposed_ores", s.set.exposed_ores.to_string()),
             ("follow_radius", s.set.follow_radius.to_string()),
+            ("legit_mine", s.set.legit_mine.to_string()),
+            ("assume_water", s.set.assume_water.to_string()),
+            ("assume_lava", s.set.assume_lava.to_string()),
+            ("mob_avoid_r", s.set.mob_avoid_r.to_string()),
+            ("mob_avoid_c", s.set.mob_avoid_c.to_string()),
+            ("parkour_place", s.set.parkour_place.to_string()),
         ]
     })
 }

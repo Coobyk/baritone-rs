@@ -219,6 +219,10 @@ fn opts(s: &rt::State) -> pf::Opts {
         allow_place: s.set.allow_place,
         allow_parkour: s.set.allow_parkour,
         max_drop: s.set.max_drop,
+        mob_avoid_r: s.set.mob_avoid_r as f64,
+        mob_avoid_c: s.set.mob_avoid_c,
+        parkour_place: s.set.parkour_place,
+        has_throwaway: s.has_throwaway,
     }
 }
 
@@ -699,7 +703,7 @@ fn build_cmd(game: &mut Game<'_>, args: &[&str]) {
     let Some(name) = args.first() else {
         let n = pending();
         if n == 0 {
-            say(game, "/b build <name> — files in schematics/ next to the game or ~/.local/share/horizon/schematics/");
+            say(game, "/b build <name> [x y z] — files in schematics/ next to the game or ~/.local/share/horizon/schematics/");
             return;
         }
         jobs(|j| j.paused = false);
@@ -707,7 +711,23 @@ fn build_cmd(game: &mut Game<'_>, args: &[&str]) {
         say(game, &format!("build resumed ({n} edits)"));
         return;
     };
-    match load_schematic(game, name) {
+    // `build <name> x y z`: the schematic's (0,0,0) lands at that absolute
+    // cell instead of the player's feet — upstream's origin args.
+    let origin: Option<[i32; 3]> = match args.get(1..4) {
+        Some([x, y, z]) => match (x.parse(), y.parse(), z.parse()) {
+            (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
+            _ => {
+                say(game, "origin must be three integers: /b build <name> x y z");
+                return;
+            }
+        },
+        None => None,
+        _ => {
+            say(game, "origin must be three integers: /b build <name> x y z");
+            return;
+        }
+    };
+    match load_schematic(game, name, origin) {
         Ok(msg) => say(game, &msg),
         Err(e) => say(game, &e),
     }
@@ -757,7 +777,11 @@ fn tag_bytes(t: Option<&horizon_world::nbt::Tag>) -> Option<&[u8]> {
 /// Legacy (id, data) pairs map through the built-in `legacy_name` table —
 /// the datafixer's own `BLOCK_IDS` table is private — and any id with no
 /// modern name is skipped and counted in the summary.
-fn load_schematic(game: &mut Game<'_>, name: &str) -> Result<String, String> {
+fn load_schematic(
+    game: &mut Game<'_>,
+    name: &str,
+    origin: Option<[i32; 3]>,
+) -> Result<String, String> {
     let Some(path) = schematic_paths(name).into_iter().find(|p| p.is_file()) else {
         return Err(format!(
             "schematic '{name}' not found (tried {name} and schematics/{name}.schematic)"
@@ -791,9 +815,26 @@ fn load_schematic(game: &mut Game<'_>, name: &str) -> Result<String, String> {
     }
     let data = tag_bytes(get("Data")).unwrap_or(&[]);
     let add = tag_bytes(get("AddBlocks")).or_else(|| tag_bytes(get("Add")));
-    let Some(me) = game.player.as_ref().map(feet) else {
+    let Some(me) = origin.or_else(|| game.player.as_ref().map(feet)) else {
         return Err("no player".to_owned());
     };
+    // `buildIgnoreBlocks`: schematic cells resolving to these names are
+    // skipped entirely. `buildSubstitutes`: `from>to,from2>to2` renames —
+    // place `to` wherever the schematic says `from`.
+    let ignores: Vec<String> = crate::game::umbx_baritone_extras::cfg_get("buildIgnoreBlocks")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
+    let subs: Vec<(String, String)> = crate::game::umbx_baritone_extras::cfg_get("buildSubstitutes")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|pair| {
+            let (f, t) = pair.split_once('>')?;
+            Some((f.trim().to_ascii_lowercase(), t.trim().to_ascii_lowercase()))
+        })
+        .collect();
 
     // Modern block names that exist in this build, for skipping unknown ids.
     let known: HashSet<&str> = game
@@ -807,6 +848,7 @@ fn load_schematic(game: &mut Game<'_>, name: &str) -> Result<String, String> {
 
     let mut edits = Vec::new();
     let mut skipped = 0u32;
+    let mut ignored = 0u32;
     let mut cleared = 0u32;
     for y in 0..h {
         // MCEdit order: index = (y * Length + z) * Width + x.
@@ -848,14 +890,27 @@ fn load_schematic(game: &mut Game<'_>, name: &str) -> Result<String, String> {
                 .entry((id, d))
                 .or_insert_with(|| legacy_name(id, d).filter(|n| known.contains(*n)));
             match *resolved {
-                Some(n) => edits.push(Edit::Place(at, n.to_string())),
+                Some(n) => {
+                    let mut want = n;
+                    for (f, t) in &subs {
+                        if name_match(n, f) && known.contains(t.as_str()) {
+                            want = t;
+                            break;
+                        }
+                    }
+                    if ignores.iter().any(|i| name_match(want, i)) {
+                        ignored += 1;
+                    } else {
+                        edits.push(Edit::Place(at, want.to_string()));
+                    }
+                }
                 None => skipped += 1,
             }
         }
     }
     let n = enqueue(game, edits);
     Ok(format!(
-        "{}: queued {n} edits ({skipped} unknown block ids skipped, {cleared} cells to clear)",
+        "{}: queued {n} edits ({skipped} unknown ids, {ignored} ignored, {cleared} cells to clear)",
         path.display()
     ))
 }

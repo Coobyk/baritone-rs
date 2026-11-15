@@ -32,6 +32,9 @@ pub enum Kind {
     Traverse,
     /// Dig straight down through the floor under our feet and drop in.
     Downward,
+    /// Jump a gap where the landing's floor is missing: place it mid-flight
+    /// off a support face, then land on it (`cells[0]` = the floor cell).
+    ParkourPlace { gap: i8 },
 }
 
 /// One path edge: arrive at `pos` by `kind`, breaking `cells` first when
@@ -52,6 +55,16 @@ pub struct Opts {
     pub allow_place: bool,
     pub allow_parkour: bool,
     pub max_drop: i32,
+    /// `mobAvoidanceRadius`/`mobAvoidanceCoefficient`: cells within this
+    /// distance of a live mob cost `c * (r - d)` extra. `r <= 0` disables.
+    pub mob_avoid_r: f64,
+    pub mob_avoid_c: f64,
+    /// `allowParkourPlace`: permit mid-flight floor placement over gaps.
+    pub parkour_place: bool,
+    /// Upstream's throwaway check: place moves (Pillar, Bridge, Traverse,
+    /// ParkourPlace) only exist while the hotbar holds a placeable block,
+    /// so the planner can't route over terrain it can't build on.
+    pub has_throwaway: bool,
 }
 
 /// Read-only world facts the planner needs, borrowing from `Game`.
@@ -93,9 +106,18 @@ impl W<'_> {
         f.full_collision || f.name.contains("slab") || f.name.contains("stairs")
     }
 
-    /// Something solid to stand on under `p`.
+    /// Something solid to stand on under `p`. `assumeWalkOnWater` /
+    /// `assumeWalkOnLava` treat the fluid's surface as floor — planner
+    /// cheats for servers where fluids are walkable, off by default.
     pub fn floor(&self, p: [i32; 3]) -> bool {
-        self.block_solid([p[0], p[1] - 1, p[2]])
+        let b = [p[0], p[1] - 1, p[2]];
+        if self.block_solid(b) {
+            return true;
+        }
+        let (aw, al) = crate::game::umbx_baritone::with(|s| {
+            (s.set.assume_water, s.set.assume_lava)
+        });
+        (aw && self.water(b)) || (al && self.lava(b))
     }
 
     /// `p` is standable: two open cells over a floor.
@@ -112,7 +134,7 @@ impl W<'_> {
     }
 
     fn break_cost(&self, p: [i32; 3]) -> f64 {
-        4.0 + (self.fat(p).hardness.max(0.05) * 5.0).min(40.0) as f64
+        1.0 + (self.fat(p).hardness.max(0.05) * 2.0).min(30.0) as f64
     }
 
     /// Ladders, vines, chains, scaffolding: climbable by name.
@@ -134,6 +156,33 @@ impl W<'_> {
         [[1, 0], [-1, 0], [0, 1], [0, -1]]
             .iter()
             .any(|[dx, dz]| self.lava([p[0] + dx, p[1], p[2] + dz]))
+    }
+
+    /// `blocksToAvoid`: the body cells at `p` hold a name on the avoid
+    /// list — walking through them costs extra (never a hard ban, so a
+    /// cornered player still escapes).
+    pub fn avoided_through(&self, p: [i32; 3]) -> bool {
+        crate::game::umbx_baritone_extras::avoided(self.fat(p).name.as_ref())
+            || crate::game::umbx_baritone_extras::avoided(
+                self.fat([p[0], p[1] + 1, p[2]]).name.as_ref(),
+            )
+    }
+
+    /// Distance to the nearest live mob's cell centre, if any.
+    pub fn mob_dist(&self, p: [i32; 3]) -> Option<f64> {
+        let mut best: Option<f64> = None;
+        for m in &self.game.mobs {
+            if m.removed || !m.alive() {
+                continue;
+            }
+            let d = ((m.position.x.floor() as i32 - p[0]).pow(2)
+                + (m.position.y.floor() as i32 - p[1]).pow(2)
+                + (m.position.z.floor() as i32 - p[2]).pow(2)) as f64;
+            if best.map_or(true, |b| d < b) {
+                best = Some(d);
+            }
+        }
+        best.map(|d2| d2.sqrt())
     }
 }
 
@@ -166,7 +215,7 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 kind: Kind::Ladder { n: 1 },
                 cells: vec![],
             });
-        } else if o.allow_place {
+        } else if o.allow_place && o.has_throwaway {
             // Pillar: stand on a block placed at our feet cell.
             out.push(Move {
                 pos: up,
@@ -264,13 +313,39 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
 
     for [dx, dz] in DIRS {
         let diag = dx != 0 && dz != 0;
-        // Vanilla can't cut a diagonal through two solid corners.
-        if diag
-            && (!w.open_cell([p[0] + dx, p[1], p[2]]) || !w.open_cell([p[0], p[1], p[2] + dz]))
-        {
+        let n = [p[0] + dx, p[1], p[2] + dz];
+        // Diagonal corner rule: each orth corner's two body cells must be
+        // open now, or breakable so a dig-through can open them. `None`
+        // kills the diagonal outright; a non-empty list holds the cells a
+        // Break edge must clear before the squeeze-through is legal.
+        let corner_cells: Option<Vec<[i32; 3]>> = if !diag {
+            Some(Vec::new())
+        } else {
+            let a = [p[0] + dx, p[1], p[2]];
+            let b = [p[0], p[1], p[2] + dz];
+            let pair = |c: [i32; 3]| {
+                (w.open_cell(c) || w.breakable(c))
+                    && (w.open_cell([c[0], c[1] + 1, c[2]])
+                        || w.breakable([c[0], c[1] + 1, c[2]]))
+            };
+            if pair(a) && pair(b) {
+                let mut v = Vec::new();
+                for c in [a, [a[0], a[1] + 1, a[2]], b, [b[0], b[1] + 1, b[2]]] {
+                    if !w.open_cell(c) {
+                        v.push(c);
+                    }
+                }
+                Some(v)
+            } else {
+                None
+            }
+        };
+        let Some(corner_cells) = corner_cells else { continue };
+        let corners_open = corner_cells.is_empty();
+        if !corners_open && !o.allow_break {
             continue;
         }
-        let n = [p[0] + dx, p[1], p[2] + dz];
+        if corners_open {
         if w.standable(n) {
             out.push(Move {
                 pos: n,
@@ -362,8 +437,32 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 }
             }
         }
+        // ParkourPlace: same jump, but the landing's floor is missing and
+        // gets placed mid-flight — needs a solid face next to that cell to
+        // click the block onto. Its own setting: risky, off by default.
+        if o.parkour_place && o.allow_place && o.has_throwaway && !diag {
+            for gap in 1..=2_i32 {
+                let land = [p[0] + dx * (gap + 1), p[1], p[2] + dz * (gap + 1)];
+                let fl = [land[0], land[1] - 1, land[2]];
+                let mut clear = w.body_open(land) && w.open_cell(fl) && !w.lava(fl);
+                for g in 1..=gap {
+                    clear = clear && w.body_open([p[0] + dx * g, p[1], p[2] + dz * g]);
+                }
+                let sup = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]
+                    .iter()
+                    .any(|o2| w.block_solid([fl[0] + o2[0], fl[1] + o2[1], fl[2] + o2[2]]));
+                if clear && sup {
+                    out.push(Move {
+                        pos: land,
+                        kind: Kind::ParkourPlace { gap: gap as i8 },
+                        cells: vec![fl],
+                    });
+                }
+            }
+        }
         // Bridge: `n`'s floor is missing but the body is open; place it.
         if o.allow_place
+            && o.has_throwaway
             && w.body_open(n)
             && !w.floor(n)
             && !w.climbable(p)
@@ -378,7 +477,13 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
         // Traverse: diagonal Bridge — `n`'s floor hangs on a side face of an
         // orth neighbour's floor. When an orth floor is also missing it is
         // placed first off our own floor's side face (two placements max).
-        if diag && o.allow_place && w.body_open(n) && !w.floor(n) && !w.climbable(p) {
+        if diag
+            && o.allow_place
+            && o.has_throwaway
+            && w.body_open(n)
+            && !w.floor(n)
+            && !w.climbable(p)
+        {
             let af = [p[0] + dx, p[1] - 1, p[2]];
             let bf = [p[0], p[1] - 1, p[2] + dz];
             let sa = w.block_solid(af);
@@ -401,13 +506,18 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 });
             }
         }
-        // Break: the body is walled by breakable blocks.
-        if o.allow_break && !diag {
+        }
+        // Break: the body is walled by breakable blocks, or a diagonal's
+        // corners are solid-but-breakable — the blocked cells go on the
+        // break list first so the squeeze-through is legal afterwards.
+        if o.allow_break {
             let feet_ok = w.open_cell(n) || w.breakable(n);
             let head = [n[0], n[1] + 1, n[2]];
             let head_ok = w.open_cell(head) || w.breakable(head);
-            if feet_ok && head_ok && (!w.open_cell(n) || !w.open_cell(head)) {
-                let mut cells = Vec::new();
+            let needs_dig =
+                !corner_cells.is_empty() || !w.open_cell(n) || !w.open_cell(head);
+            if feet_ok && head_ok && needs_dig {
+                let mut cells = corner_cells;
                 if !w.open_cell(n) {
                     cells.push(n);
                 }
@@ -521,11 +631,14 @@ pub fn find_partial(
         let gp = g[&p];
         let mut ns = Vec::new();
         succ(w, p, o, &mut ns);
+        let assume_lava = crate::game::umbx_baritone::with(|s| s.set.assume_lava);
         for m in ns {
-            // Never end a move with lava at feet, head or floor.
+            // Never end a move with lava at feet or head. The floor gets a
+            // pass under assumeWalkOnLava — the cheat exists precisely so
+            // paths can end standing on a lava surface.
             if w.lava(m.pos)
                 || w.lava([m.pos[0], m.pos[1] + 1, m.pos[2]])
-                || w.lava([m.pos[0], m.pos[1] - 1, m.pos[2]])
+                || (!assume_lava && w.lava([m.pos[0], m.pos[1] - 1, m.pos[2]]))
             {
                 continue;
             }
@@ -543,6 +656,7 @@ pub fn find_partial(
                     e
                 }
                 Kind::Parkour { gap } => 2.0 + gap as f64,
+                Kind::ParkourPlace { gap } => 4.5 + gap as f64,
                 Kind::Ladder { .. } => 1.8,
                 Kind::Swim => 2.2,
                 Kind::Break { .. } => 1.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
@@ -552,8 +666,21 @@ pub fn find_partial(
                 Kind::Traverse => 4.0,
             };
             // Standing next to lava is risky: prefer routes that keep away.
-            if w.lava_near(m.pos) {
+            // With assumeWalkOnLava the danger is assumed away too.
+            if !assume_lava && w.lava_near(m.pos) {
                 edge += 5.0;
+            }
+            // `blocksToAvoid`: the body cells at the destination hold an
+            // avoid-listed name (webs, bushes) — costly, never banned.
+            if w.avoided_through(m.pos) {
+                edge += 8.0;
+            }
+            // `mobAvoidance*`: proximity to a live mob costs extra.
+            if o.mob_avoid_r > 0.0
+                && let Some(d) = w.mob_dist(m.pos)
+                && d < o.mob_avoid_r
+            {
+                edge += o.mob_avoid_c * (o.mob_avoid_r - d);
             }
             let ng = gp + edge;
             if ng < *g.get(&m.pos).unwrap_or(&f64::INFINITY) {

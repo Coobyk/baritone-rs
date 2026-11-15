@@ -218,6 +218,11 @@ fn place_slot(game: &crate::game::Game<'_>) -> Option<usize> {
     any
 }
 
+/// Upstream's throwaway check for the planner: any placeable hotbar block.
+pub fn has_placeable(game: &crate::game::Game<'_>) -> bool {
+    place_slot(game).is_some()
+}
+
 /// Pillar/Bridge/Traverse all need a block in hand first: switch to one and
 /// spend a tick letting the selection land before the caller re-runs.
 fn hold_block(game: &mut crate::game::Game<'_>) -> Out {
@@ -242,7 +247,7 @@ pub fn drive(
         return Out::Working;
     };
     let pos = player.position;
-    let _on_ground = player.ground.on_ground;
+    let on_ground = player.ground.on_ground;
     let me = feet(player);
     let c = center(m.pos);
     // A move ends once we're firmly on its cell — integer feet can hover on
@@ -256,6 +261,28 @@ pub fn drive(
         && pos.y < c[1] + 1.4
     {
         arrived = true;
+    }
+    // Landing moves arrive when the player STANDS at the target — a hop apex
+    // sweeping through the cell mid-air doesn't count (they bounce off and
+    // come back down short of it). Pillar additionally needs its placed
+    // block to actually exist.
+    if arrived
+        && matches!(
+            m.kind,
+            pf::Kind::Walk
+                | pf::Kind::Step
+                | pf::Kind::Pillar
+                | pf::Kind::Bridge
+                | pf::Kind::Traverse
+                | pf::Kind::Parkour { .. }
+                | pf::Kind::ParkourPlace { .. }
+        )
+        && !on_ground
+    {
+        arrived = false;
+    }
+    if arrived && matches!(m.kind, pf::Kind::Pillar) && !solid(game, m.cells[0]) {
+        arrived = false;
     }
     if arrived && !matches!(m.kind, pf::Kind::Break { .. }) {
         st.want = rt::Want::default();
@@ -278,6 +305,9 @@ pub fn drive(
         pf::Kind::Step => {
             aim(game, c);
             w.forward = 1.0;
+            // No sprint: a sprint-jump overshoots the ledge and hits the
+            // face low. A controlled hop is what mounts a 1-block step.
+            w.sprint = false;
             w.jump = true;
         }
         pf::Kind::Parkour { .. } => {
@@ -285,6 +315,37 @@ pub fn drive(
             w.forward = 1.0;
             w.sprint = true;
             w.jump = true;
+        }
+        pf::Kind::ParkourPlace { .. } => {
+            let fl = m.cells[0];
+            if solid(game, fl) {
+                // Floor's down (placed it last tick, or it already was):
+                // ordinary parkour drive to the landing.
+                aim(game, c);
+                w.forward = 1.0;
+                w.sprint = true;
+                w.jump = true;
+            } else {
+                if ticks_on(m, 0) > 200 {
+                    return Out::Failed;
+                }
+                if !placeable_held(game) {
+                    return hold_block(game);
+                }
+                let Some((s, face)) = support_face(game, fl) else {
+                    return Out::Failed;
+                };
+                let hit = face_hit(s, face);
+                // Steer toward the landing; the forced hit clicks the
+                // support face regardless of look direction, so the block
+                // lands under us as we cross the gap.
+                aim(game, c);
+                w.forward = 1.0;
+                w.sprint = true;
+                w.jump = true;
+                w.hit = Some(hit);
+                w.right = true;
+            }
         }
         pf::Kind::Ladder { n } => {
             aim(game, [c[0], pos.y, c[2]]);
@@ -377,10 +438,13 @@ pub fn drive(
             if !placeable_held(game) {
                 return hold_block(game);
             }
-            // Jump and place at our feet cell (the move's `cells[0]`); bail
-            // if the placement hasn't materialised in ~2s.
+            // Jump and place at our feet cell (the move's `cells[0]`). The
+            // use rate-limit (use_delay=4) means a placement only lands when
+            // a use tick falls inside the few airborne frames where the body
+            // has vacated the cell — ~1 in 4 jumps — so the bail fuse has to
+            // allow many hops, not two seconds.
             let place = m.cells[0];
-            if !solid(game, place) && ticks_on(m, 1) > 40 {
+            if !solid(game, place) && ticks_on(m, 1) > 200 {
                 return Out::Failed;
             }
             w.sneak = false;

@@ -28,26 +28,21 @@ const CFG_DEFAULTS: &[(&str, &str)] = &[
     ("allowSprint", "true"),
     ("allowPlace", "true"),
     ("allowParkour", "true"),
-    ("allowParkourPlace", "false"),
     ("allowDiagonalAscend", "false"),
     ("allowDiagonalDescend", "false"),
     ("allowDownward", "true"),
     ("allowInventory", "false"),
     ("allowVines", "true"),
     ("allowWalkOnBottomSlab", "true"),
-    ("assumeWalkOnWater", "false"),
-    ("assumeWalkOnLava", "false"),
     ("assumeStep", "false"),
-    ("blocksToAvoidBreaking", ""),
+    ("buildIgnoreBlocks", ""),
+    ("buildSubstitutes", ""),
     ("breakFromAbove", "false"),
     ("chatControl", "true"),
     ("colorCurrentPath", "255,0,0"),
     ("colorGoalBox", "255,255,255"),
     ("exploreForBlocks", "true"),
     ("freeLook", "true"),
-    ("legitMine", "false"),
-    ("mobAvoidanceCoefficient", "1.5"),
-    ("mobAvoidanceRadius", "8"),
     ("renderCachedChunks", "false"),
     ("sprintInWater", "true"),
     ("strictDirectionCheck", "false"),
@@ -61,6 +56,9 @@ struct S {
     wps: HashMap<String, [i32; 3]>,
     /// Block-name substrings Break moves must never touch.
     blacklist: HashSet<String>,
+    /// `blocksToAvoid`: name substrings paths pay extra to walk through
+    /// (webs, sweet-berry bushes) but may still traverse.
+    avoid: HashSet<String>,
     /// Baritone setting name -> stored value (defaults filled on load).
     cfg: HashMap<String, String>,
     /// `/b goal` target, waiting for `/b path`.
@@ -69,6 +67,8 @@ struct S {
     invert: bool,
     /// Persisted state has been loaded this session.
     loaded: bool,
+    /// `visited` count at last save — autosave skips when unchanged.
+    visited_saved: usize,
 }
 
 static S: Mutex<Option<S>> = Mutex::new(None);
@@ -130,6 +130,12 @@ fn defaults() -> rt::Settings {
         mine_scan_drops: true,
         exposed_ores: false,
         follow_radius: 3,
+        legit_mine: false,
+        assume_water: false,
+        assume_lava: false,
+        mob_avoid_r: 0,
+        mob_avoid_c: 1.5,
+        parkour_place: false,
         pause: false,
     }
 }
@@ -175,6 +181,26 @@ fn save_blacklist(game: &Game<'_>) {
     game.native_set_setting(rt::MOD_ID, "blacklist", &v.join(","));
 }
 
+fn save_avoid(game: &Game<'_>) {
+    let mut v: Vec<String> = with(|s| s.avoid.iter().cloned().collect());
+    v.sort();
+    game.native_set_setting(rt::MOD_ID, "avoid", &v.join(","));
+}
+
+/// `explorefilter`'s backing store: every visited chunk as "x,z;x,z;…".
+fn save_visited(game: &Game<'_>) {
+    let mut v: Vec<(i32, i32)> = rt::with(|s| s.visited.iter().copied().collect());
+    v.sort();
+    let text = v
+        .iter()
+        .map(|(x, z)| format!("{x},{z}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    game.native_set_setting(rt::MOD_ID, "visited", &text);
+    let n = v.len();
+    with(|s| s.visited_saved = n);
+}
+
 /// First-tick load of everything `native_setting` holds for this module.
 fn load_once(game: &Game<'_>) {
     if with(|s| s.loaded) {
@@ -200,6 +226,23 @@ fn load_once(game: &Game<'_>) {
         .filter(|n| !n.is_empty())
         .map(|n| n.to_ascii_lowercase())
         .collect();
+    let avoid: HashSet<String> = game
+        .native_setting(rt::MOD_ID, "avoid")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|n| !n.is_empty())
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+    // `explorefilter`'s chunk list: "x,z;x,z;…" like upstream's file.
+    let visited: HashSet<(i32, i32)> = game
+        .native_setting(rt::MOD_ID, "visited")
+        .unwrap_or_default()
+        .split(';')
+        .filter_map(|pair| {
+            let (x, z) = pair.split_once(',')?;
+            Some((x.parse().ok()?, z.parse().ok()?))
+        })
+        .collect();
     let mut cfg = HashMap::new();
     for &(name, def) in CFG_DEFAULTS {
         let v = game
@@ -207,11 +250,15 @@ fn load_once(game: &Game<'_>) {
             .unwrap_or_else(|| def.to_owned());
         cfg.insert(name.to_owned(), v);
     }
+    let n_visited = visited.len();
+    rt::with(|s| s.visited = visited);
     with(|s| {
         s.wps = wps;
         s.blacklist = blacklist;
+        s.avoid = avoid;
         s.cfg = cfg;
         s.loaded = true;
+        s.visited_saved = n_visited;
     });
 }
 
@@ -220,6 +267,18 @@ fn load_once(game: &Game<'_>) {
 pub fn blacklisted(name: &str) -> bool {
     let n = name.trim_start_matches("minecraft:").to_ascii_lowercase();
     with(|s| s.blacklist.iter().any(|b| n.contains(b.as_str())))
+}
+
+/// `blocksToAvoid`: true when `name` matches an avoid entry — traversal
+/// stays legal, the planner just prices the cells higher.
+pub fn avoided(name: &str) -> bool {
+    let n = name.trim_start_matches("minecraft:").to_ascii_lowercase();
+    !n.is_empty() && with(|s| s.avoid.iter().any(|b| n.contains(b.as_str())))
+}
+
+/// A stored setting's value by Baritone name (`buildIgnoreBlocks` etc.).
+pub fn cfg_get(name: &str) -> Option<String> {
+    with(|s| s.cfg.get(name).cloned())
 }
 
 // ---- commands -------------------------------------------------------------
@@ -528,7 +587,16 @@ fn proc(game: &mut Game<'_>) {
     let obj = obj
         .map(|o| format!("{} {} {}", o[0], o[1], o[2]))
         .unwrap_or_else(|| "-".to_owned());
-    say(game, &format!("proc: {name} — path {at}/{len}, objective {obj}\nbaritone: {dbg}"));
+    let rest = rt::with(|s| {
+        s.path
+            .iter()
+            .enumerate()
+            .skip(s.at)
+            .map(|(i, m)| format!("{}{:?}→{:?}", if i == s.at { ">" } else { "" }, m.kind, m.pos))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    say(game, &format!("proc: {name} — path {at}/{len}, objective {obj}\nbaritone: {dbg}\nbaritone: {rest}"));
 }
 
 fn eta(game: &mut Game<'_>) {
@@ -555,6 +623,41 @@ fn eta(game: &mut Game<'_>) {
         );
     } else {
         say(game, &format!("eta: ~{secs:.0}s ({left} nodes left)"));
+    }
+}
+
+/// `/b avoid` — `blocksToAvoid`: cells holding these names cost extra to
+/// path through (webs, berry bushes) without being outright impassable.
+fn avoid_cmd(game: &mut Game<'_>, args: &[&str]) {
+    match args.first().map(|a| a.to_ascii_lowercase()) {
+        Some(a) if a == "clear" => {
+            with(|s| s.avoid.clear());
+            save_avoid(game);
+            say(game, "avoid list cleared");
+        }
+        Some(_) => {
+            let n = args[0].to_ascii_lowercase();
+            if n.is_empty() {
+                say(game, "/b avoid <block|clear>");
+                return;
+            }
+            let added = with(|s| s.avoid.insert(n.clone()));
+            save_avoid(game);
+            if added {
+                say(game, &format!("avoiding {n}"));
+            } else {
+                say(game, &format!("{n} already avoided"));
+            }
+        }
+        None => {
+            let mut v: Vec<String> = with(|s| s.avoid.iter().cloned().collect());
+            v.sort();
+            if v.is_empty() {
+                say(game, "avoid list is empty");
+            } else {
+                say(game, &format!("avoiding: {}", v.join(", ")));
+            }
+        }
     }
 }
 
@@ -622,6 +725,24 @@ fn modified(game: &mut Game<'_>) {
     if cur.follow_radius != d.follow_radius {
         lines.push(format!("followRadius = {}", cur.follow_radius));
     }
+    if cur.legit_mine != d.legit_mine {
+        lines.push(format!("legitMine = {}", cur.legit_mine));
+    }
+    if cur.assume_water != d.assume_water {
+        lines.push(format!("assumeWalkOnWater = {}", cur.assume_water));
+    }
+    if cur.assume_lava != d.assume_lava {
+        lines.push(format!("assumeWalkOnLava = {}", cur.assume_lava));
+    }
+    if cur.parkour_place != d.parkour_place {
+        lines.push(format!("allowParkourPlace = {}", cur.parkour_place));
+    }
+    if cur.mob_avoid_r != d.mob_avoid_r {
+        lines.push(format!("mobAvoidanceRadius = {}", cur.mob_avoid_r));
+    }
+    if cur.mob_avoid_c != d.mob_avoid_c {
+        lines.push(format!("mobAvoidanceCoefficient = {}", cur.mob_avoid_c));
+    }
     if cur.pause != d.pause {
         lines.push(format!("pause = {}", cur.pause));
     }
@@ -673,6 +794,30 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
             "follow_radius" | "followradius" => {
                 ("follow_radius", d.follow_radius.to_string(), "followRadius")
             }
+            "legit" | "legitmine" | "legit_mine" => {
+                ("legit_mine", d.legit_mine.to_string(), "legitMine")
+            }
+            "assumewater" | "assumewalkonwater" | "assume_water" => {
+                ("assume_water", d.assume_water.to_string(), "assumeWalkOnWater")
+            }
+            "assumelava" | "assumewalkonlava" | "assume_lava" => {
+                ("assume_lava", d.assume_lava.to_string(), "assumeWalkOnLava")
+            }
+            "parkourplace" | "allowparkourplace" | "parkour_place" => (
+                "parkour_place",
+                d.parkour_place.to_string(),
+                "allowParkourPlace",
+            ),
+            "mobavoidanceradius" | "mob_avoid_r" | "mobavoidr" => (
+                "mob_avoid_r",
+                d.mob_avoid_r.to_string(),
+                "mobAvoidanceRadius",
+            ),
+            "mobavoidancecoefficient" | "mob_avoid_c" | "mobavoidc" => (
+                "mob_avoid_c",
+                d.mob_avoid_c.to_string(),
+                "mobAvoidanceCoefficient",
+            ),
             "pause" => {
                 rt::with(|s| s.set.pause = false);
                 return Some("pause");
@@ -688,6 +833,12 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
         "mine_scan_drops" => rt::with(|s| s.set.mine_scan_drops = d.mine_scan_drops),
         "exposed_ores" => rt::with(|s| s.set.exposed_ores = d.exposed_ores),
         "follow_radius" => rt::with(|s| s.set.follow_radius = d.follow_radius),
+        "legit_mine" => rt::with(|s| s.set.legit_mine = d.legit_mine),
+        "assume_water" => rt::with(|s| s.set.assume_water = d.assume_water),
+        "assume_lava" => rt::with(|s| s.set.assume_lava = d.assume_lava),
+        "parkour_place" => rt::with(|s| s.set.parkour_place = d.parkour_place),
+        "mob_avoid_r" => rt::with(|s| s.set.mob_avoid_r = d.mob_avoid_r),
+        "mob_avoid_c" => rt::with(|s| s.set.mob_avoid_c = d.mob_avoid_c),
         _ => rt::with(|s| s.set.mine_radius = d.mine_radius),
     }
     game.native_set_setting(rt::MOD_ID, k, &v);
@@ -772,21 +923,89 @@ fn set_real(game: &mut Game<'_>, key: &str, val: Option<&str>) -> bool {
             };
             rt::with(|s| s.set.follow_radius = v.clamp(0, 32));
         }
+        "legit" | "legitmine" | "legit_mine" => {
+            rt::with(|s| s.set.legit_mine = flip(s.set.legit_mine, val))
+        }
+        "assumewater" | "assumewalkonwater" | "assume_water" => {
+            rt::with(|s| s.set.assume_water = flip(s.set.assume_water, val))
+        }
+        "assumelava" | "assumewalkonlava" | "assume_lava" => {
+            rt::with(|s| s.set.assume_lava = flip(s.set.assume_lava, val))
+        }
+        "parkourplace" | "allowparkourplace" | "parkour_place" => {
+            rt::with(|s| s.set.parkour_place = flip(s.set.parkour_place, val))
+        }
+        "mobavoidanceradius" | "mob_avoid_r" | "mobavoidr" => {
+            let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) else {
+                let cur = rt::with(|s| s.set.mob_avoid_r);
+                say(game, &format!("mobAvoidanceRadius = {cur}"));
+                return true;
+            };
+            rt::with(|s| s.set.mob_avoid_r = v.clamp(0, 32));
+        }
+        "mobavoidancecoefficient" | "mob_avoid_c" | "mobavoidc" => {
+            let Some(v) = val.and_then(|v| v.parse::<f64>().ok()) else {
+                let cur = rt::with(|s| s.set.mob_avoid_c);
+                say(game, &format!("mobAvoidanceCoefficient = {cur}"));
+                return true;
+            };
+            rt::with(|s| s.set.mob_avoid_c = v.clamp(0.0, 100.0));
+        }
+        // `blocksToAvoid` as a comma list is the same data as `/b avoid`.
+        "blockstoavoid" | "avoid" => {
+            let Some(v) = val else {
+                let cur: Vec<String> = with(|s| s.avoid.iter().cloned().collect());
+                say(game, &format!("blocksToAvoid = {}", cur.join(",")));
+                return true;
+            };
+            let list: std::collections::HashSet<String> = v
+                .split(',')
+                .filter(|n| !n.is_empty())
+                .map(|n| n.to_ascii_lowercase())
+                .collect();
+            with(|s| s.avoid = list);
+            save_avoid(game);
+            say(game, &format!("blocksToAvoid = {v}"));
+            return true;
+        }
+        // `blocksToAvoidBreaking` as a comma list is the blacklist.
+        "blockstoavoidbreaking" => {
+            let Some(v) = val else {
+                let cur: Vec<String> = with(|s| s.blacklist.iter().cloned().collect());
+                say(game, &format!("blocksToAvoidBreaking = {}", cur.join(",")));
+                return true;
+            };
+            let list: std::collections::HashSet<String> = v
+                .split(',')
+                .filter(|n| !n.is_empty())
+                .map(|n| n.to_ascii_lowercase())
+                .collect();
+            with(|s| s.blacklist = list);
+            save_blacklist(game);
+            say(game, &format!("blocksToAvoidBreaking = {v}"));
+            return true;
+        }
         _ => return false,
     }
     save_settings(game);
     let text = rt::with(|s| {
         format!(
-            "sprint={} break={} place={} parkour={} drop={} radius={} drops={} exposed={} followR={}",
+            "sprint={} break={} place={} parkour={} parkourPlace={} drop={} radius={} drops={} exposed={} followR={} legit={} water={} lava={} mobR={} mobC={}",
             s.set.sprint,
             s.set.allow_break,
             s.set.allow_place,
             s.set.allow_parkour,
+            s.set.parkour_place,
             s.set.max_drop,
             s.set.mine_radius,
             s.set.mine_scan_drops,
             s.set.exposed_ores,
             s.set.follow_radius,
+            s.set.legit_mine,
+            s.set.assume_water,
+            s.set.assume_lava,
+            s.set.mob_avoid_r,
+            s.set.mob_avoid_c,
         )
     });
     say(game, &text);
@@ -800,16 +1019,23 @@ fn set_cmd(game: &mut Game<'_>, args: &[&str]) {
         say(
             game,
             &format!(
-                "sprint={} allowBreak={} allowPlace={} allowParkour={} maxDrop={} mineRadius={}",
+                "sprint={} allowBreak={} allowPlace={} allowParkour={} allowParkourPlace={} maxDrop={} mineRadius={}",
                 cur.sprint, cur.allow_break, cur.allow_place, cur.allow_parkour,
-                cur.max_drop, cur.mine_radius
+                cur.parkour_place, cur.max_drop, cur.mine_radius
             ),
         );
         say(
             game,
             &format!(
-                "mineScanDroppedItems={} onlyExposedOres={} followRadius={}",
-                cur.mine_scan_drops, cur.exposed_ores, cur.follow_radius
+                "mineScanDroppedItems={} onlyExposedOres={} followRadius={} legitMine={}",
+                cur.mine_scan_drops, cur.exposed_ores, cur.follow_radius, cur.legit_mine
+            ),
+        );
+        say(
+            game,
+            &format!(
+                "assumeWalkOnWater={} assumeWalkOnLava={} mobAvoidanceRadius={} mobAvoidanceCoefficient={}",
+                cur.assume_water, cur.assume_lava, cur.mob_avoid_r, cur.mob_avoid_c
             ),
         );
         let mut cfgs: Vec<(String, String)> =
@@ -898,22 +1124,36 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
         "saveall" => {
             save_wps(game);
             save_blacklist(game);
-            say(game, "saveall: waypoints + blacklist saved");
+            save_avoid(game);
+            save_visited(game);
+            say(game, "saveall: waypoints + blacklist + avoid + visited saved");
         }
         "blacklist" => blacklist_cmd(game, &args[1..]),
+        "avoid" | "blockstoavoid" => avoid_cmd(game, &args[1..]),
         "modified" => modified(game),
         "reset" => reset(game, &args[1..]),
         // Upstream repack resaves the CachedWorld; this port keeps no
         // world cache, so it's a truthful no-op.
         "repack" => say(game, "repack: no world cache — nothing to resave"),
         "explorefilter" => {
-            // Upstream loads a JSON of explored chunks; this port keeps the
-            // visited set in memory, so `clear` is the useful form.
-            if args.get(1) == Some(&"clear") {
-                rt::with(|s| s.visited.clear());
-                say(game, "explore filter cleared");
-            } else {
-                say(game, "explorefilter: only `clear` (no chunk cache files)");
+            // Visited chunks persist under the `visited` setting; the set
+            // autosaves in tick and `clear` drops it outright.
+            match args.get(1).copied() {
+                Some("clear") => {
+                    rt::with(|s| s.visited.clear());
+                    save_visited(game);
+                    say(game, "explore filter cleared and saved");
+                }
+                Some("save") => {
+                    save_visited(game);
+                    let n = rt::with(|s| s.visited.len());
+                    say(game, &format!("explorefilter: {n} chunks saved"));
+                }
+                Some("count") | None => {
+                    let n = rt::with(|s| s.visited.len());
+                    say(game, &format!("explorefilter: {n} chunks tracked"));
+                }
+                _ => say(game, "/b explorefilter <save|clear|count>"),
             }
         }
         "set" | "s" => set_cmd(game, &args[1..]),
@@ -924,12 +1164,23 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
     true
 }
 
-/// First tick: pull persisted waypoints, blacklist and cfg values.
+/// First tick: pull persisted waypoints, blacklist and cfg values. After
+/// that, autosave `explorefilter`'s visited chunks every ~30s of ticks
+/// when the set has grown.
 pub fn tick(game: &mut Game<'_>) {
     if !game.native_on(rt::ID) || !game.native_window() {
         return;
     }
     load_once(game);
+    if game.ticks % 600 == 0 {
+        let (cur, saved) = {
+            let n = rt::with(|s| s.visited.len());
+            (n, with(|s| s.visited_saved))
+        };
+        if cur != saved {
+            save_visited(game);
+        }
+    }
 }
 
 /// Settings-page buttons; `click` receives the same local index.

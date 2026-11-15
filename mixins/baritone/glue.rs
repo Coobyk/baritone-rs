@@ -15,6 +15,46 @@ use crate::game::umbx_pathfind as pf;
 use crate::game::umbx_baritone_exec as ex;
 use crate::game::Game;
 
+fn center(p: [i32; 3]) -> [f64; 3] {
+    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
+}
+
+/// `legitMine`'s line of sight: a voxel walk from `a` to `b` that is true
+/// only when the first fully-colliding cell it reaches is `b`'s own.
+fn los(game: &Game<'_>, a: [f64; 3], b: [f64; 3]) -> bool {
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if len < 1e-6 {
+        return true;
+    }
+    let s = [d[0] / len, d[1] / len, d[2] / len];
+    let target = [b[0].floor() as i32, b[1].floor() as i32, b[2].floor() as i32];
+    let mut last = [i32::MAX; 3];
+    let mut t = 0.0;
+    while t <= len {
+        let c = [
+            (a[0] + s[0] * t).floor() as i32,
+            (a[1] + s[1] * t).floor() as i32,
+            (a[2] + s[2] * t).floor() as i32,
+        ];
+        if c != last {
+            if c == target {
+                return true;
+            }
+            let f = game
+                .res
+                .facts()
+                .get(game.world.block(c[0], c[1], c[2]));
+            if f.full_collision {
+                return false;
+            }
+            last = c;
+        }
+        t += 0.5;
+    }
+    false
+}
+
 fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
     [
         p.position.x.floor() as i32,
@@ -82,6 +122,10 @@ fn opts(s: &rt::State) -> pf::Opts {
         allow_place: s.set.allow_place,
         allow_parkour: s.set.allow_parkour,
         max_drop: s.set.max_drop,
+        mob_avoid_r: s.set.mob_avoid_r as f64,
+        mob_avoid_c: s.set.mob_avoid_c,
+        parkour_place: s.set.parkour_place,
+        has_throwaway: s.has_throwaway,
     }
 }
 
@@ -663,6 +707,10 @@ pub(super) fn tick(game: &mut Game<'_>) {
             rt::load(k, &v);
         }
     }
+    // Refresh the throwaway check so this tick's plans can't emit place
+    // moves the hotbar can't supply.
+    let can_place = ex::has_placeable(game);
+    rt::with(|s| s.has_throwaway = can_place);
     driver(game);
     auto_eat(game);
     // `click` pulses and the auto-eat hold overlay whatever the driver
@@ -826,6 +874,7 @@ fn driver(game: &mut Game<'_>) {
                     s.stuck = 0;
                     s.replanned = false;
                     s.stale_cd = 30;
+                    s.last_dist = f64::MAX;
                     s.note.clear();
                 });
             }
@@ -858,6 +907,9 @@ fn driver(game: &mut Game<'_>) {
                     | pf::Kind::Parkour { .. } => !w.standable(m.pos),
                     pf::Kind::Drop { .. } => !w.standable(m.pos) && !w.water(m.pos),
                     pf::Kind::Swim => !w.water(m.pos),
+                    // Floor may not exist yet — that's the point of the
+                    // move — so only the body space is validated.
+                    pf::Kind::ParkourPlace { .. } => !w.body_open(m.pos),
                     _ => false,
                 }
             });
@@ -893,6 +945,7 @@ fn driver(game: &mut Game<'_>) {
                     s.at += 1;
                     s.stuck = 0;
                     s.vert_fails = 0;
+                    s.last_dist = f64::MAX;
                 });
                 if rt::with(|s| s.at >= s.path.len()) {
                     // A partial path ends short of the goal: re-plan, don't
@@ -921,16 +974,19 @@ fn driver(game: &mut Game<'_>) {
                         s.path.clear();
                         s.stuck = 0;
                         s.vert_fails += 1;
+                        s.note = format!("failed {:?} to {:?} (x{})", m.kind, m.pos, s.vert_fails);
                         s.vert_fails
                     });
                     if fails >= 5 {
-                        say(game, "can't climb that — giving up");
+                        say(game, &format!("can't climb {:?} to {:?} — giving up", m.kind, m.pos));
                         rt::with(|s| s.halt());
                     }
                 } else {
                     let done = rt::with(|s| {
+                        s.note = format!("skipped failed {:?} to {:?}", m.kind, m.pos);
                         s.at += 1;
                         s.stuck = 0;
+                        s.last_dist = f64::MAX;
                         s.at >= s.path.len()
                     });
                     if done {
@@ -942,16 +998,24 @@ fn driver(game: &mut Game<'_>) {
         }
     }
 
-    // Stuck watchdog: progress is horizontal cell travel, or vertical travel
-    // only while a move that climbs/descends is active — hopping in place is
-    // not progress. Hop at ~10 still ticks, re-plan once at 40, quit at 120.
-    let last = rt::with(|s| s.last_pos);
-    let moved = me[0] != last[0]
-        || me[2] != last[2]
-        || (vertical_move && me[1] != last[1]);
+    // Stuck watchdog: progress is closing on the current move's target —
+    // sliding off a ledge and walking back used to reset the clock forever —
+    // or vertical travel while a climb/descent move is active. Hop at ~10
+    // still ticks, re-plan once at 40, quit at 120.
     let stuck = rt::with(|s| {
+        let tgt = s.path.get(s.at).map(|m| m.pos);
+        let dist = tgt.map(|t| {
+            (((me[0] - t[0]).pow(2) + (me[2] - t[2]).pow(2)) as f64).sqrt()
+        });
+        let closer = dist.is_some_and(|d| d < s.last_dist - 0.25);
+        let vert = vertical_move && me[1] != s.last_pos[1];
         s.last_pos = me;
-        if moved {
+        if let Some(d) = dist {
+            s.last_dist = s.last_dist.min(d);
+        } else {
+            s.last_dist = f64::MAX;
+        }
+        if closer || vert {
             s.stuck = 0;
         } else {
             s.stuck += 1;
@@ -978,17 +1042,23 @@ fn driver(game: &mut Game<'_>) {
 /// Mine: keep `s.objective` on the nearest matching block in the radius; a
 /// finished path means the block is gone, so rescan.
 fn mine_step(game: &mut Game<'_>) {
-    let (names, radius, cur, was_drop, exposed) = rt::with(|s| {
+    let (names, radius, cur, was_drop, exposed, legit) = rt::with(|s| {
         (
             s.mine_names.clone(),
             s.set.mine_radius,
             s.objective,
             s.drop_pickup,
             s.set.exposed_ores,
+            s.set.legit_mine,
         )
     });
     let Some(player) = game.player.as_ref() else { return };
     let me = feet(player);
+    let eye = [
+        player.position.x,
+        player.position.y + 1.62,
+        player.position.z,
+    ];
     let w = pf::W { game };
     // If a target is still there and still in scan range, keep it.
     if let Some(t) = cur {
@@ -1070,6 +1140,21 @@ fn mine_step(game: &mut Game<'_>) {
                     continue;
                 }
                 if names.iter().any(|n| f.name.contains(n.as_str())) {
+                    // `legitMine`: only blocks the eye can actually see —
+                    // or has seen this session — are legal targets.
+                    if legit {
+                        let seen = rt::with(|s| s.seen_ores.contains(&p));
+                        if !seen {
+                            if !los(game, eye, center(p)) {
+                                continue;
+                            }
+                            rt::with(|s| {
+                                if s.seen_ores.len() < 4096 {
+                                    s.seen_ores.insert(p);
+                                }
+                            });
+                        }
+                    }
                     let d = dx.abs() + dy.abs() + dz.abs();
                     if best.map_or(true, |(b, _, _)| d < b) {
                         best = Some((d, p, false));
