@@ -19,9 +19,10 @@ A [Baritone](https://github.com/cabaletta/baritone)-style pathing bot for
 | `/b axis` | Walk to the nearest coordinate axis |
 | `/b spawn` `/b click [left\|right]` | Path to world spawn / pulse a click |
 | `/b pause` `/b resume` `/b stop` `/b path` | Control the active task |
-| `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `drop`, `radius`, `drops` |
+| `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `parkourPlace`, `drop`, `radius`, `drops`, `exposed`, `followRadius`, `legit`, `water`, `lava`, `mobR`, `mobC` |
 | `/b goal <x> <z>` `/b invert` | Stored goal; `invert` + `path` runs away from it |
 | `/b blacklist <block\|clear>` | Blocks the pathfinder won't break and mine skips |
+| `/b avoid <block\|clear>` | Blocks the pathfinder still uses but charges +8 (upstream `blocksToAvoid`) |
 | `/b sel ...` | Selections: pos1/pos2, fill, replace, walls, shell, expand, shift, copy/cut/paste |
 | `/b build <name>` | Build a `.schematic` file; `/b build` resumes the queue |
 | `/b farm [r]` | Harvest, replant and till farmland |
@@ -36,9 +37,15 @@ A [Baritone](https://github.com/cabaletta/baritone)-style pathing bot for
 
 Cost-weighted A* over block cells: walk, step-up, drops (up to
 `max_drop`), parkour gaps (1–2 cells), ladder/vine/scaffold climbs,
-water, **break-through** (digs walls when `allow_break`), **pillar**
-(jump + place underfoot) and **bridge** (sneak + place ahead) when
-`allow_place` and a placeable block is held.
+water, **break-through** (digs walls — including diagonal corner cells —
+when `allow_break`), **pillar** (jump + place underfoot), **bridge**
+(sneak + place ahead) and **ParkourPlace** (mid-air floor placement over
+a gap, `allowParkourPlace`) when `allow_place` and a placeable block is
+held. `legit` mine mode raycasts targets first (`seen_ores` keeps ones
+once visible); `mobR`/`mobC` charge path cost near mobs; `water`/`lava`
+assume fluids walkable for planning (upstream's `assumeWalkOnWater` /
+`assumeWalkOnLava` cheats); explored cells are remembered across
+restarts (`explorefilter`).
 
 Breaking and placing run through the game's own input: the mod points
 `forced_hit` at the target face and holds `left`/`right`, so the normal
@@ -59,10 +66,11 @@ not Baritone's full elytra solver.
 
 ## Not ported
 
-Baritone's long-range chunk cache/waypoint world data, `assume*`
-walk-on-lava cheats, mob-avoidance path costs, and its ~80 individual
-settings beyond the ones here (`/b set` still accepts their names and
-stores them harmlessly).
+Baritone's long-range chunk cache/waypoint world data, and its ~80
+individual settings beyond the ones here (`/b set` still accepts their
+names and stores them harmlessly). `assumeWalkOnLava` plans over lava
+floors but vanilla physics still sinks the player — the cheat only
+changes the planner, same as upstream's.
 
 ## Layout
 
