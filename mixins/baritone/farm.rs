@@ -301,17 +301,27 @@ fn scan(game: &crate::game::Game<'_>) -> usize {
     let seeds = seed_slot(game).is_some();
     let hoe = hoe_slot(game).is_some();
     let (min_y, max_y) = (game.world.shape.min_y, game.world.shape.max_y());
-    let mut jobs: Vec<(f64, Job)> = Vec::new();
+    let mut jobs: Vec<(f64, Job)> = Vec::with_capacity(JOBS_CAP + 8);
+    // Only the JOBS_CAP nearest jobs survive, so once we have enough, cells
+    // farther than the current cap-th candidate can be skipped without any
+    // block lookups. Prunes a radius-96 scan from ~633k reads to a fraction.
+    let mut bound = f64::INFINITY;
     for dx in -radius..=radius {
         for dz in -radius..=radius {
+            if (dx * dx + dz * dz) as f64 > bound {
+                continue;
+            }
             for dy in -Y_BAND..=Y_BAND {
                 let p = [me[0] + dx, me[1] + dy, me[2] + dz];
                 if p[1] < min_y || p[1] > max_y {
                     continue;
                 }
+                let d2 = cell_dist2(me, p);
+                if d2 > bound {
+                    continue;
+                }
                 let above = [p[0], p[1] + 1, p[2]];
                 let name = block_name(game, p);
-                let d2 = cell_dist2(me, p);
                 if name.contains("farmland") {
                     if crop(block_name(game, above)) {
                         let j = Job { kind: Kind::Harvest, cell: above };
@@ -331,6 +341,14 @@ fn scan(game: &crate::game::Game<'_>) -> usize {
                     }
                 }
             }
+        }
+        // Tighten the prune bound from time to time. It is always the
+        // cap-th nearest candidate seen so far (>= the true cap-th), so
+        // skipping farther cells can never discard a job we'd keep.
+        if jobs.len() >= JOBS_CAP && (dx + radius) % 8 == 0 {
+            jobs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            jobs.truncate(JOBS_CAP);
+            bound = jobs.last().map_or(f64::INFINITY, |j| j.0);
         }
     }
     // Nearest-first: sort ascending by distance, keep the closest
@@ -557,6 +575,9 @@ fn start(game: &mut crate::game::Game<'_>, radius: i32) {
     let radius = radius.clamp(8, 96);
     // Fresh statics every start; take over the shared process slot.
     with(|s| *s = Farm::new(radius));
+    // Only one feature module may own the shared input slot — park a build
+    // queue that might still be mid-edit (persists the pause too).
+    crate::game::umbx_baritone_build::park(game);
     rt::with(|s| {
         s.halt();
         s.busy = true;
@@ -571,13 +592,20 @@ fn start(game: &mut crate::game::Game<'_>, radius: i32) {
     say(game, &format!("farming {n} jobs within {radius} blocks"));
 }
 
-/// Stop the process and release the shared input slot.
-fn stop(game: &mut crate::game::Game<'_>) {
-    with(|s| *s = Farm::idle());
+/// Give up the shared input slot without needing a `Game` (used by other
+/// feature modules when they take over).
+pub fn park() {
+    with(|s| s.running = false);
     rt::with(|s| {
         s.busy = false;
         s.want = rt::Want::default();
     });
+}
+
+/// Stop the process and release the shared input slot.
+fn stop(game: &mut crate::game::Game<'_>) {
+    with(|s| *s = Farm::idle());
+    park();
     ex::apply(game, &rt::Want::default());
 }
 

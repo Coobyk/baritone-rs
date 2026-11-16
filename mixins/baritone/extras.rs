@@ -94,7 +94,8 @@ fn parse_pos(v: &str) -> Option<[i32; 3]> {
 }
 
 fn flip(b: bool, v: Option<&str>) -> bool {
-    match v {
+    // Command arguments keep their original case, so compare case-insensitive.
+    match v.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("off" | "false" | "no" | "0") => false,
         Some("on" | "true" | "yes" | "1") => true,
         Some(_) => b,
@@ -360,7 +361,9 @@ fn wp(game: &mut Game<'_>, args: &[&str]) {
                 return;
             };
             let name = name.to_ascii_lowercase();
-            if name.contains(',') || name == "names" {
+            // The persisted form is `name=x,y,z;name=x,y,z`, so these
+            // separators would corrupt every marker on the next reload.
+            if name.contains([',', '=', ';', ' ']) || name == "names" {
                 say(game, "bad waypoint name");
                 return;
             }
@@ -537,9 +540,19 @@ fn find_cmd(game: &mut Game<'_>, args: &[&str]) {
     };
     let radius = rt::with(|s| s.set.mine_radius);
     let mut best: Option<(i32, [i32; 3])> = None;
+    let mut bd = i32::MAX;
     for dx in -radius..=radius {
+        if dx.abs() > bd {
+            continue;
+        }
         for dz in -radius..=radius {
+            if dx.abs() + dz.abs() > bd {
+                continue;
+            }
             for dy in -8i32..=8 {
+                if dx.abs() + dz.abs() + dy.abs() > bd {
+                    continue;
+                }
                 let p = [me[0] + dx, me[1] + dy, me[2] + dz];
                 if p[1] < game.world.shape.min_y || p[1] > game.world.shape.max_y() {
                     continue;
@@ -547,7 +560,8 @@ fn find_cmd(game: &mut Game<'_>, args: &[&str]) {
                 let st = game.world.block(p[0], p[1], p[2]);
                 if game.res.facts().get(st).name.contains(q.as_str()) {
                     let d = dx.abs() + dy.abs() + dz.abs();
-                    if best.map_or(true, |(b, _)| d < b) {
+                    if d < bd {
+                        bd = d;
                         best = Some((d, p));
                     }
                 }

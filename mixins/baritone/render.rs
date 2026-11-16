@@ -440,7 +440,7 @@ pub fn world(
     }
 }
 
-/// `/b render <path|goal|waypoints> [on|off]`; args arrive lower-cased.
+/// `/b render <path|goal|waypoints> [on|off]`.
 pub fn command(game: &mut crate::game::Game<'_>, args: &[&str]) -> bool {
     if !on(game) {
         return false;
@@ -476,7 +476,7 @@ fn render_cmd(game: &mut Game<'_>, args: &[&str]) {
     };
     let new = with(|s| {
         let cur = *key_slot(s, key).unwrap();
-        let new = match args.get(1).copied() {
+        let new = match args.get(1).map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("off" | "false" | "no" | "0") => false,
             Some("on" | "true" | "yes" | "1") => true,
             _ => !cur,

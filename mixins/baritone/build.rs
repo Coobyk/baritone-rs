@@ -99,8 +99,19 @@ fn jobs<R>(f: impl FnOnce(&mut Jobs) -> R) -> R {
     f(g.as_mut().unwrap())
 }
 
+/// Park the queue so another feature module can own the input slot.
+pub fn park(game: &Game<'_>) {
+    jobs(|j| {
+        j.drove = false;
+        j.paused = true;
+    });
+    game.native_set_setting(rt::MOD_ID, "build_paused", "true");
+}
+
 /// Queue `edits` behind any pending ones and start driving.
 pub fn enqueue(game: &Game<'_>, edits: Vec<Edit>) -> usize {
+    // Only one feature module may drive at a time: take the slot from farm.
+    crate::game::umbx_baritone_farm::park();
     let n = jobs(|j| {
         if j.queue.is_empty() {
             j.skipped = 0;
@@ -132,7 +143,7 @@ fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
 }
 
 fn center(p: [i32; 3]) -> [f64; 3] {
-    [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5]
+    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
 }
 
 fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -250,6 +261,10 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
 /// Every client tick: reload the persisted pause flag, then drive the queue.
 pub fn tick(game: &mut Game<'_>) {
     if !game.native_on(rt::ID) || !game.native_window() {
+        // A half-placed edit must not keep `use`/`attack` latched when the
+        // mod is switched off or the window changes.
+        rt::with(|s| s.want = rt::Want::default());
+        ex::apply(game, &rt::Want::default());
         return;
     }
     if let Some(v) = game.native_setting(rt::MOD_ID, "build_paused") {
@@ -364,8 +379,11 @@ fn driver(game: &mut Game<'_>) {
         return;
     };
     if proc != rt::Proc::None {
-        // A core process (goto/mine/...) owns the inputs this tick; the
-        // queue resumes when it finishes.
+        // A core process (goto/mine/...) owns the inputs this tick. Release
+        // our ownership so its `halt()` doesn't look like a user `/b stop`
+        // and silently park the queue.
+        jobs(|j| j.drove = false);
+        rt::with(|s| s.busy = false);
         return;
     }
 
@@ -438,6 +456,19 @@ fn execute(game: &mut Game<'_>, i: usize, pos: [i32; 3], eye: [f64; 3]) {
         )
     };
     if occupied && !matching {
+        // A wrong *unbreakable* block can never be cleared, so `satisfied`
+        // would loop forever and hold attack. Skip the edit instead.
+        let unbreakable = game
+            .res
+            .facts()
+            .get(game.world.block(pos[0], pos[1], pos[2]))
+            .hardness
+            < 0.0;
+        if unbreakable {
+            drop_edit(i);
+            say(game, "unbreakable block in the way — edit dropped");
+            return;
+        }
         // Wrong block in the cell: mine it out, place next tick.
         attack(game, pos);
         return;
@@ -614,7 +645,13 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
                 jobs(|j| {
                     j.path = path;
                     j.at = 0;
-                    j.misses = 0;
+                    // Reset the retry counter only when a real path was
+                    // found — resetting on the empty path too meant `misses`
+                    // never reached 3 and an unreachable edit was attacked
+                    // forever.
+                    if !empty {
+                        j.misses = 0;
+                    }
                 });
                 if empty {
                     // Path-goal reached but just outside arm's reach — try

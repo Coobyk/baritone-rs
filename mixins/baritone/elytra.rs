@@ -255,7 +255,15 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
                 Phase::Launch
             };
             with(|s| *s = S::start([x, z], phase));
-            rt::with(|s| s.busy = true);
+            // Take the shared input slot from every other driver: a core
+            // `proc` would fold this run away on the next tick, and a farm/
+            // build process would keep writing `want` alongside ours.
+            crate::game::umbx_baritone_farm::park();
+            crate::game::umbx_baritone_build::park(game);
+            rt::with(|s| {
+                s.halt();
+                s.busy = true;
+            });
             say(game, &format!("elytra: gliding toward {x} {z}"));
             true
         }

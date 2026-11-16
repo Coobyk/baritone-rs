@@ -775,7 +775,7 @@ pub fn find_partial(
 /// Nearest standable cell in column `(x,z)` to `near_y` (goto x z's goal).
 pub fn column_top(w: &W, x: i32, z: i32, near_y: i32) -> Option<[i32; 3]> {
     let mut best: Option<(i32, [i32; 3])> = None;
-    for y in -63..=w.top() {
+    for y in w.game.world.shape.min_y..=w.top() {
         let p = [x, y, z];
         if w.standable(p) {
             let d = (y - near_y).abs();

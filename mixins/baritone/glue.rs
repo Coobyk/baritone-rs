@@ -744,7 +744,10 @@ fn explore(game: &mut Game<'_>, args: &[&str]) {
             .map(|v| v == "true")
             .unwrap_or(true);
     rt::with(|s| {
-        s.visited.clear();
+        // Keep `visited`: it is loaded from / saved to the mod store so
+        // exploration resumes across runs. `/b explorefilter clear` is the
+        // explicit reset — clearing it on every `/b explore` made that
+        // persistence pointless.
         s.explore_names = if filtered { names.clone() } else { Vec::new() };
         s.begin(rt::Proc::Explore);
     });
@@ -759,6 +762,10 @@ fn tunnel(game: &mut Game<'_>, args: &[&str]) {
     // Upstream: `tunnel` or `tunnel <height> <width> <length>` all-or-none.
     // A bare number stays our length shorthand (`tunnel 50` = 1×2 for 50).
     let ints: Vec<i32> = args.iter().filter_map(|a| a.parse::<i32>().ok()).collect();
+    if !args.is_empty() && ints.is_empty() {
+        say(game, "/b tunnel [height] [width] [length] — integers only");
+        return;
+    }
     let (h, w, len) = match ints.as_slice() {
         [] => (2, 1, 4096),
         [n] => (2, 1, *n),
@@ -831,7 +838,10 @@ fn auto_eat(game: &mut Game<'_>) {
     };
     let eating = rt::with(|s| s.eat_ticks > 0);
     if !proc_active {
-        rt::with(|s| s.eat_ticks = 0);
+        rt::with(|s| {
+            s.eat_ticks = 0;
+            s.want.right = false;
+        });
         return;
     }
     if eating {
@@ -848,7 +858,14 @@ fn auto_eat(game: &mut Game<'_>) {
             food > s.eat_food || !held_food || up
         });
         if done {
-            rt::with(|s| s.eat_ticks = 0);
+            rt::with(|s| {
+                s.eat_ticks = 0;
+                // `ex::apply` already ran this tick, so the eat-hold set on
+                // `want.right` would survive into the next tick and re-latch
+                // game.right forever (also disabling auto-eat via the
+                // `want.right` short-circuit). Clear it when the bite ends.
+                s.want.right = false;
+            });
         } else {
             rt::with(|s| {
                 s.want.right = true;
@@ -939,12 +956,14 @@ fn set(game: &mut Game<'_>, args: &[&str]) {
         return;
     };
     let val = args.get(1).copied();
-    let flip = |b: bool, v: Option<&str>| match v {
+    let flip = |b: bool, v: Option<&str>| match v.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("off" | "false" | "no" | "0") => false,
         Some("on" | "true" | "yes" | "1") => true,
         Some(_) => b,
         None => !b,
     };
+    // Don't call back into the game (say) while the state Mutex is held.
+    let mut unknown = false;
     rt::with(|s| match *key {
         "sprint" => s.set.sprint = flip(s.set.sprint, val),
         "break" | "allowbreak" | "allow_break" => s.set.allow_break = flip(s.set.allow_break, val),
@@ -973,8 +992,11 @@ fn set(game: &mut Game<'_>, args: &[&str]) {
                 s.set.follow_radius = v.clamp(0, 32);
             }
         }
-        _ => say(game, &format!("unknown setting {key}")),
+        _ => unknown = true,
     });
+    if unknown {
+        say(game, &format!("unknown setting {key}"));
+    }
     save(game);
     let text = rt::with(|s| {
         format!(
@@ -1072,6 +1094,13 @@ fn driver(game: &mut Game<'_>) {
         ex::apply(game, &rt::Want::default());
         return;
     }
+    // Back off after a failed plan so an unreachable goal doesn't re-plan
+    // (and stall the game thread) on every single tick.
+    rt::with(|s| {
+        if s.plan_cd > 0 {
+            s.plan_cd -= 1;
+        }
+    });
 
     // Processes with their own targeting pick an objective cell first.
     match proc {
@@ -1116,8 +1145,9 @@ fn driver(game: &mut Game<'_>) {
         return;
     }
 
-    // Re-plan when the path is exhausted (or was cleared).
-    if rt::with(|s| s.at >= s.path.len()) {
+    // Re-plan when the path is exhausted (or was cleared), unless a recent
+    // failure put us in a short back-off window.
+    if rt::with(|s| s.at >= s.path.len() && s.plan_cd == 0) {
         let w = pf::W::new(game);
         let Some(start) = start_cell(game) else { return };
         let o = rt::with(|s| opts(s));
@@ -1184,6 +1214,7 @@ fn driver(game: &mut Game<'_>) {
                     s.replanned = false;
                     s.stale_cd = 30;
                     s.last_dist = f64::MAX;
+                    s.plan_fails = 0;
                     s.note.clear();
                 });
             }
@@ -1206,11 +1237,24 @@ fn driver(game: &mut Game<'_>) {
                         s.note.clear();
                     });
                 } else {
-                    rt::with(|s| {
+                    // No path this tick is not a reason to abort: chunks may
+                    // still be loading, or the player may move into range.
+                    // Clear the stale path, back off and retry a few times
+                    // before giving up with the real reason (previously a
+                    // single failure set `stuck=120` and halted this tick).
+                    let fails = rt::with(|s| {
+                        s.path.clear();
+                        s.stuck = 0;
+                        s.plan_cd = 20;
+                        s.plan_fails += 1;
                         s.note =
                             format!("no path from {:?} to {:?} (me {:?})", start, goal, me);
-                        s.stuck = 120
+                        s.plan_fails
                     });
+                    if fails >= 6 {
+                        say(game, &format!("no path to {:?} — giving up", goal));
+                        rt::with(|s| s.halt());
+                    }
                 }
             }
         }
@@ -1350,7 +1394,9 @@ fn driver(game: &mut Game<'_>) {
         let dist = tgt.map(|t| {
             (((me[0] - t[0]).pow(2) + (me[2] - t[2]).pow(2)) as f64).sqrt()
         });
-        let closer = dist.is_some_and(|d| d < s.last_dist - 0.25);
+        // Per-tick travel is ~0.2 blocks, so the old 0.25 margin made real
+        // progress all but invisible and let the clock build mid-walk.
+        let closer = dist.is_some_and(|d| d < s.last_dist - 0.02);
         let vert = vertical_move && me[1] != s.last_pos[1];
         s.last_pos = me;
         if let Some(d) = dist {
@@ -1368,7 +1414,7 @@ fn driver(game: &mut Game<'_>) {
         }
         s.stuck
     });
-    if stuck == 40 && !rt::with(|s| s.replanned) {
+    if stuck >= 40 && stuck < 120 && !rt::with(|s| s.replanned) {
         rt::with(|s| {
             s.replanned = true;
             s.path.clear();
@@ -1784,6 +1830,14 @@ fn explore_step(game: &mut Game<'_>) {
     let w = pf::W::new(game);
     let names = rt::with(|s| s.explore_names.clone());
     if !names.is_empty() {
+        // The scan below is ~72k block reads. With no match in range it used
+        // to run every tick and hitch the client; throttle it like mine's
+        // rescan. A short pause between sweeps is invisible in practice.
+        if rt::with(|s| s.cooldown > 0) {
+            rt::with(|s| s.cooldown -= 1);
+            return;
+        }
+        rt::with(|s| s.cooldown = 10);
         // Nearest matching block with a standable face-adjacent cell in a
         // column we haven't visited yet.
         let mut best: Option<(i32, [i32; 3])> = None;
@@ -1897,14 +1951,28 @@ fn tunnel_step(game: &mut Game<'_>) {
         return;
     }
     if size == [1, 2] {
-        rt::with(|s| {
-            s.objective = Some([me[0] + dir[0] * 3, me[1], me[2] + dir[1] * 3]);
-            if let rt::Proc::Tunnel { left: l } = s.proc {
-                s.proc = rt::Proc::Tunnel {
-                    left: l.saturating_sub(1),
-                };
-            }
-        });
+        // Plain corridor: walk/break straight ahead. `left` counts columns,
+        // not ticks — advance only when the player actually enters the next
+        // column (the wide branch does the same with its dig queue).
+        let mut col = rt::with(|s| s.tunnel_col);
+        if col == [i32::MIN; 3] {
+            col = [me[0] + dir[0], me[1], me[2] + dir[1]];
+            rt::with(|s| s.tunnel_col = col);
+        }
+        if me[0] == col[0] && me[2] == col[2] {
+            let ahead = [col[0] + dir[0], col[1], col[2] + dir[1]];
+            rt::with(|s| {
+                s.tunnel_col = ahead;
+                s.objective = Some(ahead);
+                if let rt::Proc::Tunnel { left: l } = s.proc {
+                    s.proc = rt::Proc::Tunnel {
+                        left: l.saturating_sub(1),
+                    };
+                }
+            });
+        } else {
+            rt::with(|s| s.objective = Some(col));
+        }
         return;
     }
     let w = pf::W::new(game);

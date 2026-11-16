@@ -131,6 +131,13 @@ pub struct State {
     pub stale_cd: u8,
     /// Ticks until the process's next decision (follow repath, mine rescan).
     pub cooldown: u32,
+    /// Retry delay after a failed plan. Without it the driver re-plans every
+    /// tick on an unreachable goal, and (previously) a single failure set the
+    /// stuck clock to 120 and aborted the whole process in the same tick.
+    pub plan_cd: u32,
+    /// Consecutive failed plans. A few retries let chunks load / the player
+    /// move; a persistent failure eventually gives up with an honest message.
+    pub plan_fails: u8,
     /// Tunnel's step direction.
     pub tunnel_dir: [i32; 2],
     /// `tunnel <h> <w>` cross-section size (width × height; 1×2 is the
@@ -215,6 +222,8 @@ impl State {
             vert_fails: 0,
             stale_cd: 0,
             cooldown: 0,
+            plan_cd: 0,
+            plan_fails: 0,
             busy: false,
             objective: None,
             tunnel_dir: [0, 0],
@@ -282,6 +291,9 @@ impl State {
         self.vert_fails = 0;
         self.stale_cd = 0;
         self.last_dist = f64::MAX;
+        self.last_pos = [i32::MIN; 3];
+        self.plan_cd = 0;
+        self.plan_fails = 0;
         self.want = Want::default();
         self.set.pause = false;
         self.eat_ticks = 0;
@@ -298,7 +310,13 @@ impl State {
         self.vert_fails = 0;
         self.stale_cd = 0;
         self.last_dist = f64::MAX;
+        self.last_pos = [i32::MIN; 3];
         self.cooldown = 0;
+        self.plan_cd = 0;
+        self.plan_fails = 0;
+        // A new process must not inherit the previous one's held inputs —
+        // several `begin()` callers skip the core driver for a tick.
+        self.want = Want::default();
         self.excavate = false;
         self.drop_pickup = false;
         self.drop_stall = 0;
