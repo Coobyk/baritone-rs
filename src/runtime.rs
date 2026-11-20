@@ -7,7 +7,13 @@ use std::sync::Mutex;
 /// `b`/`baritone` mod id, so settings land under `.horizon-mod-data/baritone/`.
 pub const MOD_ID: &str = "baritone";
 pub const ID: &str = MOD_ID;
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = match option_env!("CARGO_PKG_VERSION") { Some(v) => v, None => "2.0.0" };
+
+/// `native_on`'s replacement: whether this code mod is enabled in the
+/// instance's mod switches (`mod_index_on` tracks Options > Mods).
+pub fn enabled(_game: &crate::game::Game<'_>) -> bool {
+    mod_api::__private::mod_index(ID).is_some_and(mod_api::__private::mod_index_on)
+}
 pub const DESCRIPTION: &str =
     "Baritone-style pathing: goto, mine, follow, explore, tunnel";
 

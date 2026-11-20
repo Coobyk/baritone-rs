@@ -64,7 +64,7 @@ fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
 }
 
 fn on(game: &Game<'_>) -> bool {
-    game.native_on(rt::ID)
+    rt::enabled(game)
 }
 
 /// The window's own game, not the single player server's.
@@ -123,15 +123,6 @@ fn opts(s: &rt::State) -> pf::Opts {
     rt::opts(s)
 }
 
-/// `native_mods`: the mod list entry.
-pub(super) fn listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>) {
-    mods.push(crate::game::native_hooks::NativeMod {
-        id: rt::ID.into(),
-        title: format!("Baritone {}", rt::VERSION),
-        description: rt::DESCRIPTION.into(),
-        keys: Vec::new(),
-    });
-}
 
 /// `native_commands`: names the chat box completes and colours.
 pub(super) fn commands(game: &Game<'_>, commands: &mut Vec<&'static str>) {
@@ -155,17 +146,17 @@ const USAGES: &[&str] = &[
     " goto <x:integer> <y:integer> <z:integer>",
     " goto y <y:integer>",
     " g <x:integer> <z:integer>",
-    " mine <blocks:text?>",
-    " mine <count:integer> <blocks:text?>",
-    " m <blocks:text?>",
+    " mine <blocks:baritone:blocks>",
+    " mine <count:integer> <blocks:baritone:blocks>",
+    " m <blocks:baritone:blocks>",
     " follow",
-    " follow player <name:player_name>",
-    " follow entity <type:word?>",
+    " follow player <name:player>",
+    " follow entity <type:baritone:entity>",
     " follow entities",
     " follow <target:word>",
     " f <target:word>",
-    " explore [filter:text?]",
-    " e [filter:text?]",
+    " explore [filter:baritone:blocks]",
+    " e [filter:baritone:blocks]",
     " tunnel [height:integer] [width:integer] [length:integer]",
     " t [height:integer] [width:integer] [length:integer]",
     " thisway [blocks:integer]",
@@ -182,28 +173,28 @@ const USAGES: &[&str] = &[
     " cancel",
     " forcecancel",
     " click",
-    " click <button:word?>",
-    " set <key:word?> [value:word?]",
-    " s <key:word?> [value:word?]",
+    " click <button:baritone:click_button>",
+    " set <key:baritone:setting> [value:baritone:bool_value]",
+    " s <key:baritone:setting> [value:baritone:bool_value]",
     " sprint [state:boolean]",
     " wp",
     " wp list",
     " wp save <name:word>",
-    " wp goto <name:word?>",
-    " wp delete <name:word?>",
+    " wp goto <name:baritone:waypoint>",
+    " wp delete <name:baritone:waypoint>",
     " wp clear",
-    " modified [setting:word?]",
-    " reset <setting:word?>",
+    " modified [setting:baritone:setting]",
+    " reset <setting:baritone:setting>",
     " saveall",
     " reloadall",
     " repack",
     " gc",
-    " blacklist [block:text?]",
-    " avoid [block:text?]",
-    " blockstoavoid [block:text?]",
+    " blacklist [block:baritone:blocks]",
+    " avoid [block:baritone:blocks]",
+    " blockstoavoid [block:baritone:blocks]",
     " explorefilter",
-    " explorefilter <action:word?>",
-    " find <block:text?>",
+    " explorefilter <action:baritone:explore_action>",
+    " find <block:baritone:blocks>",
     " surface",
     " top",
     " come",
@@ -215,38 +206,54 @@ const USAGES: &[&str] = &[
     " sel pos2",
     " sel clear",
     " sel area",
-    " sel expand <dir:word?> [n:integer]",
-    " sel shift <dir:word?> [n:integer]",
+    " sel expand <dir:baritone:dir> [n:integer]",
+    " sel shift <dir:baritone:dir> [n:integer]",
     " sel copy",
     " sel cut",
     " sel paste",
-    " sel fill [block:text?]",
-    " sel replace [from:word?] [to:word?]",
-    " sel walls [block:text?]",
-    " sel shell [block:text?]",
+    " sel fill [block:baritone:blocks]",
+    " sel replace [from:baritone:blocks] [to:baritone:blocks]",
+    " sel walls [block:baritone:blocks]",
+    " sel shell [block:baritone:blocks]",
     " build",
-    " build <name:word?> [x:integer] [y:integer] [z:integer]",
+    " build <name:baritone:schematic> [x:integer] [y:integer] [z:integer]",
     " schematica",
     " farm",
     " farm off",
     " farm <radius:integer>",
     " render",
-    " render <target:word?> [state:boolean]",
+    " render <target:baritone:render_target> [state:boolean]",
     " elytra",
     " elytra <x:integer> <z:integer>",
 ];
 
-/// `native_register_commands`: the `/b` grammar as usages.
-pub(super) fn register_commands(
+/// `native_register_client_commands`: the same usages on the client tree,
+/// which colours and completes them like the game's own.
+pub(super) fn client_commands(
     game: &mut Game<'_>,
-    commands: &mut Vec<crate::mod_api::NativeCommand>,
+    commands: &mut Vec<mod_api::Command>,
 ) {
     if !on(game) {
         return;
     }
     for usage in USAGES {
         for root in ["b", "baritone"] {
-            commands.push(crate::mod_api::NativeCommand::new(&format!(
+            commands.push(mod_api::Command::new(&format!("{root}{usage}")));
+        }
+    }
+}
+
+/// `native_register_commands`: the `/b` grammar as usages.
+pub(super) fn register_commands(
+    game: &mut Game<'_>,
+    commands: &mut Vec<mod_api::Command>,
+) {
+    if !on(game) {
+        return;
+    }
+    for usage in USAGES {
+        for root in ["b", "baritone"] {
+            commands.push(mod_api::Command::new(&format!(
                 "{root}{usage}"
             )));
         }
@@ -256,45 +263,11 @@ pub(super) fn register_commands(
 /// Block names `/b mine`, `find`, `explore`, `blacklist`, `avoid` and
 /// `sel fill` complete. The block registry isn't enumerable through the
 /// mod surface, so this is the common set — every name the commands accept
-/// still parses whether it's listed or not.
-const BLOCK_NAMES: &[&str] = &[
-    "air", "stone", "granite", "diorite", "andesite", "deepslate", "tuff", "dirt",
-    "grass_block", "dirt_path", "farmland", "sand", "red_sand", "gravel", "clay", "mud",
-    "cobblestone", "mossy_cobblestone", "stone_bricks", "bricks", "bedrock", "obsidian",
-    "coal_ore", "iron_ore", "copper_ore", "gold_ore", "lapis_ore", "redstone_ore",
-    "diamond_ore", "emerald_ore",
-    "deepslate_coal_ore", "deepslate_iron_ore", "deepslate_copper_ore",
-    "deepslate_gold_ore", "deepslate_lapis_ore", "deepslate_redstone_ore",
-    "deepslate_diamond_ore", "deepslate_emerald_ore",
-    "nether_gold_ore", "nether_quartz_ore", "ancient_debris",
-    "oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log",
-    "dark_oak_log", "mangrove_log", "cherry_log", "pale_oak_log",
-    "crimson_stem", "warped_stem",
-    "oak_leaves", "spruce_leaves", "birch_leaves", "jungle_leaves",
-    "acacia_leaves", "dark_oak_leaves",
-    "water", "lava", "ice", "snow", "snow_block", "powder_snow",
-    "glass", "cobweb", "torch", "ladder", "vine", "scaffolding",
-    "wheat", "carrots", "potatoes", "beetroots", "sugar_cane", "cactus",
-    "pumpkin", "melon", "sweet_berry_bush",
-    "rail", "powered_rail", "detector_rail", "activator_rail",
-    "netherrack", "soul_sand", "soul_soil", "basalt", "blackstone",
-    "nether_bricks", "end_stone",
-    "short_grass", "tall_grass", "fern", "dead_bush", "leaf_litter",
-    "chest", "crafting_table", "furnace", "barrel", "spawner",
-    "nether_portal", "end_portal_frame",
-];
 
-/// Entity names `/b follow entity` completes.
-const ENTITY_NAMES: &[&str] = &[
-    "player", "zombie", "skeleton", "creeper", "spider", "cave_spider", "enderman",
-    "witch", "slime", "cow", "pig", "sheep", "chicken", "horse", "villager",
-    "iron_golem", "wolf", "axolotl", "item",
-];
 
-/// `sel` directions (`expand`/`shift` take these).
-const SEL_DIRS: &[&str] = &[
-    "up", "down", "north", "south", "east", "west", "u", "d", "n", "s", "e", "w",
-];
+
+
+
 
 /// Schematic names in `schematics/` under the dirs `build` loads from.
 fn schematic_names() -> Vec<String> {
@@ -327,18 +300,27 @@ fn schematic_names() -> Vec<String> {
     out
 }
 
-/// `native_tab_complete_v2`: answers for the `word?`/`text?` arguments in
+/// `native_tab_complete`: answers for the `baritone:*` arguments in
 /// `USAGES` — settings keys, waypoint names, block/entity names, schematic
-/// files — matched on the subcommand, not just the word being typed.
+/// files — matched on the subcommand, not just the word being typed. The
+/// old `label`/`arguments` pair is the raw `command` line now, so it is
+/// split here (trailing space means a fresh empty argument).
 pub(super) fn tab_complete(
     game: &mut Game<'_>,
     _player: u128,
     _name: &str,
-    label: &str,
-    arguments: &[String],
+    command: &str,
     range: [usize; 2],
-    suggestions: &mut Vec<crate::mod_api::Suggestion>,
+    suggestions: &mut Vec<horizon_client_core::suggestion::Suggestion>,
 ) {
+    let mut words = command.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+    if command.ends_with(char::is_whitespace) || words.len() == 1 {
+        words.push(String::new());
+    }
+    let Some(label) = words.first().cloned() else {
+        return;
+    };
+    let arguments: &[String] = &words[1..];
     if !label.eq_ignore_ascii_case("b") && !label.eq_ignore_ascii_case("baritone") {
         return;
     }
@@ -359,7 +341,7 @@ pub(super) fn tab_complete(
     let mut push = |cands: Vec<String>| {
         for c in cands {
             if c.to_ascii_lowercase().starts_with(&prefix) {
-                suggestions.push(crate::mod_api::Suggestion {
+                suggestions.push(horizon_client_core::suggestion::Suggestion {
                     range: (range[0], range[1]),
                     text: format!("{stem}{c}"),
                     tooltip: None,
@@ -388,9 +370,9 @@ pub(super) fn tab_complete(
         {
             push(crate::game::umbx_baritone_extras::wp_names(game))
         }
-        "mine" | "m" | "find" | "explore" | "e" if pos >= 1 => push(owned(BLOCK_NAMES)),
+        "mine" | "m" | "find" | "explore" | "e" if pos >= 1 => push(owned(crate::game::umbx_baritone_names::BLOCK_NAMES)),
         "blacklist" | "avoid" | "blockstoavoid" if pos >= 1 => {
-            let mut c = owned(BLOCK_NAMES);
+            let mut c = owned(crate::game::umbx_baritone_names::BLOCK_NAMES);
             c.push("clear".to_owned());
             push(c);
         }
@@ -398,13 +380,13 @@ pub(super) fn tab_complete(
             if matches!(sub.as_deref(), Some("expand" | "shift" | "e" | "ex" | "s" | "sh"))
                 && pos == 2
             {
-                push(owned(SEL_DIRS));
+                push(owned(crate::game::umbx_baritone_names::SEL_DIRS));
             } else if matches!(
                 sub.as_deref(),
                 Some("fill" | "f" | "replace" | "r" | "walls" | "w" | "shell")
             ) && pos >= 2
             {
-                push(owned(BLOCK_NAMES));
+                push(owned(crate::game::umbx_baritone_names::BLOCK_NAMES));
             }
         }
         "build" if pos == 1 => push(schematic_names()),
@@ -415,7 +397,7 @@ pub(super) fn tab_complete(
         },
         "explorefilter" if pos == 1 => push(owned(&["save", "clear", "count"])),
         "follow" | "f" if pos == 2 && sub.as_deref() == Some("entity") => {
-            push(owned(ENTITY_NAMES))
+            push(owned(crate::game::umbx_baritone_names::ENTITY_NAMES))
         }
         "click" if pos == 1 => push(owned(&["left", "right"])),
         _ => {}
@@ -1010,7 +992,7 @@ fn set(game: &mut Game<'_>, args: &[&str]) {
 
 fn save(game: &Game<'_>) {
     for (k, v) in rt::to_save() {
-        game.native_set_setting(rt::MOD_ID, k, &v);
+        game.set_setting(rt::MOD_ID, k, &v);
     }
 }
 
@@ -1024,7 +1006,7 @@ pub(super) fn tick(game: &mut Game<'_>) {
     // Every persisted key reloads here — reading only the originals used to
     // silently revert the newer settings on every restart.
     for k in rt::KEYS {
-        if let Some(v) = game.native_setting(rt::MOD_ID, k) {
+        if let Some(v) = game.setting(rt::MOD_ID, k) {
             rt::load(k, &v);
         }
     }
@@ -1035,12 +1017,13 @@ pub(super) fn tick(game: &mut Game<'_>) {
     // Java's `#` prefix: rewrite a leading `#` in the open chat box to
     // `/b ` — Brigadier then completes it like any /b line, and
     // `client_mod_command` runs it before the server ever sees it.
-    if let Some((text, _)) = game.native_chat_input()
-        && let Some(rest) = text.strip_prefix('#')
+    // (`native_chat_input`/`native_set_chat_input` are gone; the chat
+    // screen's `TextField` is read and written directly.)
+    if let Some(chat) = game.ui.chat_screen.as_mut()
+        && let Some(rest) = chat.input.value.strip_prefix('#').map(str::to_owned)
     {
-        let line = format!("/b {}", rest.trim_start());
-        let end = line.chars().count();
-        let _ = game.native_set_chat_input(&line, end);
+        chat.input.value = format!("/b {}", rest.trim_start());
+        chat.input.cursor = chat.input.value.chars().count();
     }
     driver(game);
     auto_eat(game);
@@ -2031,10 +2014,7 @@ fn tunnel_step(game: &mut Game<'_>) {
 /// `native_movement_input`: press the keys the executor asked for.
 pub(super) fn movement_input(
     game: &Game<'_>,
-    forward: &mut f32,
-    strafe: &mut f32,
-    jump: &mut bool,
-    sneak: &mut bool,
+    call: &mut mod_api::__private::MovementInputCall<'_>,
 ) {
     if !on(game) || !client(game) {
         return;
@@ -2044,14 +2024,17 @@ pub(super) fn movement_input(
             return;
         }
         if s.want.forward != 0.0 {
-            *forward = s.want.forward;
-            *strafe = 0.0;
+            *call.forward = s.want.forward;
+            *call.strafe = 0.0;
         }
         if s.want.jump {
-            *jump = true;
+            *call.jump = true;
         }
         if s.want.sneak {
-            *sneak = true;
+            *call.sneak = true;
+        }
+        if s.want.sprint {
+            *call.sprint = true;
         }
     });
 }

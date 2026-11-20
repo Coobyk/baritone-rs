@@ -128,7 +128,7 @@ fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
 }
 
 fn on(game: &Game<'_>) -> bool {
-    game.native_on(rt::ID)
+    rt::enabled(game)
 }
 
 fn client(game: &Game<'_>) -> bool {

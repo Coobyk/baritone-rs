@@ -105,7 +105,7 @@ pub fn park(game: &Game<'_>) {
         j.drove = false;
         j.paused = true;
     });
-    game.native_set_setting(rt::MOD_ID, "build_paused", "true");
+    game.set_setting(rt::MOD_ID, "build_paused", "true");
 }
 
 /// Queue `edits` behind any pending ones and start driving.
@@ -121,7 +121,7 @@ pub fn enqueue(game: &Game<'_>, edits: Vec<Edit>) -> usize {
         j.paused = false;
         j.queue.len()
     });
-    game.native_set_setting(rt::MOD_ID, "build_paused", "false");
+    game.set_setting(rt::MOD_ID, "build_paused", "false");
     n
 }
 
@@ -174,6 +174,7 @@ fn aim(game: &mut Game<'_>, at: [f64; 3]) {
 
 fn face_hit(cell: [i32; 3], face: [i32; 3]) -> crate::game::Hit {
     crate::game::Hit {
+        inside: false,
         pos: cell,
         face,
         point: [
@@ -239,7 +240,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
     if !matches!(head.to_ascii_lowercase().as_str(), "build" | "schematica" | "schem") {
         return false;
     }
-    if !game.native_on(rt::ID) || !game.native_window() {
+    if !rt::enabled(game) || !game.native_window() {
         return true;
     }
     match head.to_ascii_lowercase().as_str() {
@@ -260,14 +261,14 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
 
 /// Every client tick: reload the persisted pause flag, then drive the queue.
 pub fn tick(game: &mut Game<'_>) {
-    if !game.native_on(rt::ID) || !game.native_window() {
+    if !rt::enabled(game) || !game.native_window() {
         // A half-placed edit must not keep `use`/`attack` latched when the
         // mod is switched off or the window changes.
         rt::with(|s| s.want = rt::Want::default());
         ex::apply(game, &rt::Want::default());
         return;
     }
-    if let Some(v) = game.native_setting(rt::MOD_ID, "build_paused") {
+    if let Some(v) = game.setting(rt::MOD_ID, "build_paused") {
         jobs(|j| j.paused = v == "true");
     }
     driver(game);
@@ -295,7 +296,7 @@ pub fn click(game: &mut Game<'_>, button: usize) -> bool {
         j.paused = !j.paused;
         j.paused
     });
-    game.native_set_setting(rt::MOD_ID, "build_paused", &paused.to_string());
+    game.set_setting(rt::MOD_ID, "build_paused", &paused.to_string());
     true
 }
 
@@ -319,7 +320,7 @@ fn driver(game: &mut Game<'_>) {
             j.drove = false;
             j.paused = true;
         });
-        game.native_set_setting(rt::MOD_ID, "build_paused", "true");
+        game.set_setting(rt::MOD_ID, "build_paused", "true");
     }
     if pause || jobs(|j| j.paused) {
         // Hold still but keep the queue (it resumes on unpause).
@@ -752,7 +753,7 @@ fn build_cmd(game: &mut Game<'_>, args: &[&str]) {
             return;
         }
         jobs(|j| j.paused = false);
-        game.native_set_setting(rt::MOD_ID, "build_paused", "false");
+        game.set_setting(rt::MOD_ID, "build_paused", "false");
         say(game, &format!("build resumed ({n} edits)"));
         return;
     };
@@ -798,18 +799,18 @@ fn schematic_paths(name: &str) -> Vec<PathBuf> {
     out
 }
 
-fn tag_int(t: Option<&horizon_world::nbt::Tag>) -> Option<i32> {
+fn tag_int(t: Option<&horizon_core::nbt::Tag>) -> Option<i32> {
     match t {
-        Some(horizon_world::nbt::Tag::Byte(v)) => Some(i32::from(*v)),
-        Some(horizon_world::nbt::Tag::Short(v)) => Some(i32::from(*v)),
-        Some(horizon_world::nbt::Tag::Int(v)) => Some(*v),
+        Some(horizon_core::nbt::Tag::Byte(v)) => Some(i32::from(*v)),
+        Some(horizon_core::nbt::Tag::Short(v)) => Some(i32::from(*v)),
+        Some(horizon_core::nbt::Tag::Int(v)) => Some(*v),
         _ => None,
     }
 }
 
-fn tag_bytes(t: Option<&horizon_world::nbt::Tag>) -> Option<&[u8]> {
+fn tag_bytes(t: Option<&horizon_core::nbt::Tag>) -> Option<&[u8]> {
     match t {
-        Some(horizon_world::nbt::Tag::ByteArray(v)) => Some(v.as_slice()),
+        Some(horizon_core::nbt::Tag::ByteArray(v)) => Some(v.as_slice()),
         _ => None,
     }
 }

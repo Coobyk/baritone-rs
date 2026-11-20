@@ -144,7 +144,7 @@ fn defaults() -> rt::Settings {
 /// Persist the six real settings (`rt::to_save` keys).
 fn save_settings(game: &Game<'_>) {
     for (k, v) in rt::to_save() {
-        game.native_set_setting(rt::MOD_ID, k, &v);
+        game.set_setting(rt::MOD_ID, k, &v);
     }
 }
 
@@ -159,16 +159,16 @@ fn save_wps(game: &Game<'_>) {
         .map(|(n, _)| n.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    game.native_set_setting(rt::MOD_ID, "wp_names", &names);
+    game.set_setting(rt::MOD_ID, "wp_names", &names);
     // `wp_list`: the render module's marker source (`name=x,y,z;...`).
     let list = items
         .iter()
         .map(|(n, p)| format!("{n}={},{},{}", p[0], p[1], p[2]))
         .collect::<Vec<_>>()
         .join(";");
-    game.native_set_setting(rt::MOD_ID, "wp_list", &list);
+    game.set_setting(rt::MOD_ID, "wp_list", &list);
     for (n, p) in items {
-        game.native_set_setting(
+        game.set_setting(
             rt::MOD_ID,
             &format!("wp_{n}"),
             &format!("{},{},{}", p[0], p[1], p[2]),
@@ -179,13 +179,13 @@ fn save_wps(game: &Game<'_>) {
 fn save_blacklist(game: &Game<'_>) {
     let mut v: Vec<String> = with(|s| s.blacklist.iter().cloned().collect());
     v.sort();
-    game.native_set_setting(rt::MOD_ID, "blacklist", &v.join(","));
+    game.set_setting(rt::MOD_ID, "blacklist", &v.join(","));
 }
 
 fn save_avoid(game: &Game<'_>) {
     let mut v: Vec<String> = with(|s| s.avoid.iter().cloned().collect());
     v.sort();
-    game.native_set_setting(rt::MOD_ID, "avoid", &v.join(","));
+    game.set_setting(rt::MOD_ID, "avoid", &v.join(","));
 }
 
 /// `explorefilter`'s backing store: every visited chunk as "x,z;x,z;…".
@@ -197,7 +197,7 @@ fn save_visited(game: &Game<'_>) {
         .map(|(x, z)| format!("{x},{z}"))
         .collect::<Vec<_>>()
         .join(";");
-    game.native_set_setting(rt::MOD_ID, "visited", &text);
+    game.set_setting(rt::MOD_ID, "visited", &text);
     let n = v.len();
     with(|s| s.visited_saved = n);
 }
@@ -208,12 +208,12 @@ fn load_once(game: &Game<'_>) {
         return;
     }
     let mut wps = HashMap::new();
-    if let Some(names) = game.native_setting(rt::MOD_ID, "wp_names") {
+    if let Some(names) = game.setting(rt::MOD_ID, "wp_names") {
         for n in names.split(',') {
             if n.is_empty() {
                 continue;
             }
-            if let Some(v) = game.native_setting(rt::MOD_ID, &format!("wp_{n}")) {
+            if let Some(v) = game.setting(rt::MOD_ID, &format!("wp_{n}")) {
                 if let Some(p) = parse_pos(&v) {
                     wps.insert(n.to_owned(), p);
                 }
@@ -221,14 +221,14 @@ fn load_once(game: &Game<'_>) {
         }
     }
     let blacklist: HashSet<String> = game
-        .native_setting(rt::MOD_ID, "blacklist")
+        .setting(rt::MOD_ID, "blacklist")
         .unwrap_or_default()
         .split(',')
         .filter(|n| !n.is_empty())
         .map(|n| n.to_ascii_lowercase())
         .collect();
     let avoid: HashSet<String> = game
-        .native_setting(rt::MOD_ID, "avoid")
+        .setting(rt::MOD_ID, "avoid")
         .unwrap_or_default()
         .split(',')
         .filter(|n| !n.is_empty())
@@ -236,7 +236,7 @@ fn load_once(game: &Game<'_>) {
         .collect();
     // `explorefilter`'s chunk list: "x,z;x,z;…" like upstream's file.
     let visited: HashSet<(i32, i32)> = game
-        .native_setting(rt::MOD_ID, "visited")
+        .setting(rt::MOD_ID, "visited")
         .unwrap_or_default()
         .split(';')
         .filter_map(|pair| {
@@ -247,7 +247,7 @@ fn load_once(game: &Game<'_>) {
     let mut cfg = HashMap::new();
     for &(name, def) in CFG_DEFAULTS {
         let v = game
-            .native_setting(rt::MOD_ID, &format!("cfg_{name}"))
+            .setting(rt::MOD_ID, &format!("cfg_{name}"))
             .unwrap_or_else(|| def.to_owned());
         cfg.insert(name.to_owned(), v);
     }
@@ -989,7 +989,7 @@ fn reset_real(game: &Game<'_>, key: &str) -> Option<&'static str> {
         "bottom_slab" => rt::with(|s| s.set.bottom_slab = d.bottom_slab),
         _ => rt::with(|s| s.set.mine_radius = d.mine_radius),
     }
-    game.native_set_setting(rt::MOD_ID, k, &v);
+    game.set_setting(rt::MOD_ID, k, &v);
     Some(label)
 }
 
@@ -1005,7 +1005,7 @@ fn reset(game: &mut Game<'_>, args: &[&str]) {
             with(|s| {
                 s.cfg.insert(name.to_owned(), def.to_owned());
             });
-            game.native_set_setting(rt::MOD_ID, &format!("cfg_{name}"), def);
+            game.set_setting(rt::MOD_ID, &format!("cfg_{name}"), def);
         }
         say(game, "all settings reset to defaults");
         return;
@@ -1018,7 +1018,7 @@ fn reset(game: &mut Game<'_>, args: &[&str]) {
         with(|s| {
             s.cfg.insert(canon.to_owned(), def.to_owned());
         });
-        game.native_set_setting(rt::MOD_ID, &format!("cfg_{canon}"), def);
+        game.set_setting(rt::MOD_ID, &format!("cfg_{canon}"), def);
         say(game, &format!("reset {canon} = {def}"));
         return;
     }
@@ -1260,7 +1260,7 @@ fn set_cmd(game: &mut Game<'_>, args: &[&str]) {
                 with(|s| {
                     s.cfg.insert(canon.to_owned(), v.to_owned());
                 });
-                game.native_set_setting(rt::MOD_ID, &format!("cfg_{canon}"), v);
+                game.set_setting(rt::MOD_ID, &format!("cfg_{canon}"), v);
                 say(game, &format!("{canon} = {v} (stored; no effect here)"));
             }
             None => {
@@ -1279,7 +1279,7 @@ fn set_cmd(game: &mut Game<'_>, args: &[&str]) {
 /// `/b` subcommands this module owns. `args` is the lower-cased head + args;
 /// returns false for everything the core (or another module) handles.
 pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
-    if !game.native_on(rt::ID) || !game.native_window() {
+    if !rt::enabled(game) || !game.native_window() {
         return false;
     }
     let Some(&head) = args.first() else {
@@ -1365,7 +1365,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
 /// that, autosave `explorefilter`'s visited chunks every ~30s of ticks
 /// when the set has grown.
 pub fn tick(game: &mut Game<'_>) {
-    if !game.native_on(rt::ID) || !game.native_window() {
+    if !rt::enabled(game) || !game.native_window() {
         return;
     }
     load_once(game);

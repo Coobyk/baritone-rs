@@ -18,33 +18,29 @@
 
 use std::sync::Mutex;
 
-use crate::game::native_hooks::NativeBlockRim;
+use mod_api::BlockRim;
 use crate::game::umbx_baritone as rt;
 use crate::game::Game;
-use horizon_client::text::Text;
 
-/// Path: Java Baritone's `colorCurrentPath` — a solid red ribbon through
-/// the upcoming nodes (the canvas has no line primitive, so thin quads).
-const LINE_SPRITE: &str = "block/white_concrete";
-const LINE_RGBA: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
-/// Ribbon half-width in blocks — a ~4 cm line.
-const LINE_HALF: f32 = 0.03;
+
+/// Path: Java Baritone's `colorCurrentPath` — a solid red line through
+/// the upcoming nodes.
+const LINE_ARGB: u32 = 0xFF_FF_00_00;
+/// Line width in screen pixels.
+const LINE_W: f32 = 2.0;
 /// Blocks queued to break / the mine objective: translucent green fill and
 /// wireframe rim, like Java's blocks-to-mine highlight.
-const TARGET_FILL: [u8; 4] = [0x00, 0xFF, 0x3C, 0x48];
+const TARGET_FILL_ARGB: u32 = 0x48_00_FF_3C;
 const TARGET_RIM: u32 = 0xFF_00_FF_3C;
 const TARGET_W: f32 = 2.0;
 /// Objective cell: translucent white fill + rim, like Java's goal box.
-const GOAL_FILL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x40];
+const GOAL_FILL_ARGB: u32 = 0x40_FF_FF_FF;
 const GOAL_ARGB: u32 = 0xFF_22_CC_88;
 const GOAL_W: f32 = 2.0;
 /// Waypoints: blue rim + light name text.
 const WP_ARGB: u32 = 0xFF_55_AA_FF;
 const WP_W: f32 = 1.5;
 const WP_TEXT: u32 = 0xFF_DD_EE_FF;
-const OUTLINE: u32 = 0xB0_00_00_00;
-/// World-text scale: ~9px glyphs at this size sit on a block top.
-const SCALE: f32 = 0.045;
 /// Most path nodes drawn per frame.
 const MAX_NODES: usize = 256;
 /// Most target blocks filled per frame.
@@ -53,8 +49,6 @@ const MAX_TARGETS: usize = 48;
 const MAX_WPS: usize = 64;
 /// Ticks between persisted-setting re-reads.
 const SYNC_TICKS: u32 = 30;
-/// Sprite the translucent fills shade with.
-const FILL_SPRITE: &str = "block/white_concrete";
 
 struct S {
     path: bool,
@@ -85,7 +79,7 @@ fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
 }
 
 fn on(game: &Game<'_>) -> bool {
-    game.native_on(rt::MOD_ID) && game.native_window()
+    rt::enabled(game) && game.native_window()
 }
 
 fn onoff(b: bool) -> &'static str {
@@ -135,10 +129,10 @@ fn sync(game: &Game<'_>) {
     if !due {
         return;
     }
-    let p = game.native_setting(rt::MOD_ID, "render_path");
-    let g = game.native_setting(rt::MOD_ID, "render_goal");
-    let w = game.native_setting(rt::MOD_ID, "render_waypoints");
-    let list = game.native_setting(rt::MOD_ID, "wp_list");
+    let p = game.setting(rt::MOD_ID, "render_path");
+    let g = game.setting(rt::MOD_ID, "render_goal");
+    let w = game.setting(rt::MOD_ID, "render_waypoints");
+    let list = game.setting(rt::MOD_ID, "wp_list");
     with(|s| {
         s.loaded = true;
         if let Some(v) = p {
@@ -221,19 +215,13 @@ fn targets(game: &Game<'_>) -> Vec<[i32; 3]> {
     out
 }
 
-/// A translucent filled box on `cell` — six quads, each emitted twice
-/// (the canvas culls back faces) so the fill reads from every side.
-fn fill_box(
-    game: &Game<'_>,
-    draw: &mut crate::mod_api::NativeWorldDraw,
-    cell: [i32; 3],
-    color: [u8; 4],
-) {
-    // Grown slightly past the block faces so the fill doesn't z-fight the
-    // world mesh (Java expands the selection box the same way).
-    const E: f32 = 0.008;
-    const O: f32 = 1.0 + E * 2.0;
-    const FACES: [[[f32; 3]; 4]; 6] = [
+/// A translucent filled box on `cell` — six two-sided quads, grown
+/// slightly past the block faces so the fill doesn't z-fight the world
+/// mesh (Java expands the selection box the same way).
+fn fill_box(quads: &mut Vec<mod_api::WorldQuad>, cell: [i32; 3], color: u32) {
+    const E: f64 = 0.008;
+    const O: f64 = 1.0 + E * 2.0;
+    const FACES: [[[f64; 3]; 4]; 6] = [
         [[0., 0., 0.], [O, 0., 0.], [O, 0., O], [0., 0., O]], // down
         [[0., O, 0.], [0., O, O], [O, O, O], [O, O, 0.]], // up
         [[O, 0., 0.], [O, O, 0.], [0., O, 0.], [0., 0., 0.]], // north
@@ -241,97 +229,42 @@ fn fill_box(
         [[0., 0., 0.], [0., O, 0.], [0., O, O], [0., 0., O]], // west
         [[O, 0., O], [O, O, O], [O, O, 0.], [O, 0., 0.]], // east
     ];
-    draw.push();
-    if draw.translate_world([
-        cell[0] as f64 - E as f64,
-        cell[1] as f64 - E as f64,
-        cell[2] as f64 - E as f64,
-    ]) {
-        for f in FACES {
-            game.native_world_quad(draw, FILL_SPRITE, f, [0., 0., 16., 16.], color);
-            let rev = [f[3], f[2], f[1], f[0]];
-            game.native_world_quad(draw, FILL_SPRITE, rev, [0., 0., 16., 16.], color);
-        }
-    }
-    draw.pop();
-}
-
-/// One ribbon of the path line: a thin quad strip along the segment,
-/// offset by `p` (the perpendicular half-width vector), both windings.
-fn ribbon(
-    game: &Game<'_>,
-    draw: &mut crate::mod_api::NativeWorldDraw,
-    d: [f32; 3],
-    p: [f32; 3],
-) {
-    let corners: [[f32; 3]; 4] = [
-        [p[0], p[1], p[2]],
-        [-p[0], -p[1], -p[2]],
-        [d[0] - p[0], d[1] - p[1], d[2] - p[2]],
-        [d[0] + p[0], d[1] + p[1], d[2] + p[2]],
-    ];
-    game.native_world_quad(draw, LINE_SPRITE, corners, [0., 0., 16., 16.], LINE_RGBA);
-    let rev = [corners[3], corners[2], corners[1], corners[0]];
-    game.native_world_quad(draw, LINE_SPRITE, rev, [0., 0., 16., 16.], LINE_RGBA);
-}
-
-/// Java's red path line: two crossed quad ribbons per segment — one flat,
-/// one standing — so it reads as a line looking down, across, and along
-/// climbs (no line primitive exists).
-fn line_segment(
-    game: &Game<'_>,
-    draw: &mut crate::mod_api::NativeWorldDraw,
-    a: [i32; 3],
-    b: [i32; 3],
-) {
-    let d = [
-        (b[0] - a[0]) as f32,
-        (b[1] - a[1]) as f32,
-        (b[2] - a[2]) as f32,
-    ];
-    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-    if len < 0.05 {
-        return;
-    }
-    let (ux, uy, uz) = (d[0] / len, d[1] / len, d[2] / len);
-    // First perpendicular: horizontal (the flat ribbon on the ground).
-    let (mut hx, mut hz) = (-uz, ux);
-    let hl = (hx * hx + hz * hz).sqrt();
-    if hl < 1e-4 {
-        // Vertical segment: any horizontal perpendicular works.
-        hx = 1.0;
-        hz = 0.0;
-    } else {
-        hx /= hl;
-        hz /= hl;
-    }
-    // Second: perpendicular to both — the standing fin, which degenerates
-    // to a flat strip for fully vertical segments (cross is zero-length).
-    let (vx, vy, vz) = (uy * hz, -(ux * hz - uz * hx), -uy * hx);
-    let vl = (vx * vx + vy * vy + vz * vz).sqrt().max(1e-4);
-    let (vx, vy, vz) = (
-        vx / vl * LINE_HALF,
-        vy / vl * LINE_HALF,
-        vz / vl * LINE_HALF,
+    let (x, y, z) = (
+        cell[0] as f64 - E,
+        cell[1] as f64 - E,
+        cell[2] as f64 - E,
     );
-    let (hx, hz) = (hx * LINE_HALF, hz * LINE_HALF);
-    draw.push();
-    if draw.translate_world([
-        a[0] as f64 + 0.5,
-        a[1] as f64 + 0.5,
-        a[2] as f64 + 0.5,
-    ]) {
-        ribbon(game, draw, d, [hx, 0.0, hz]);
-        ribbon(game, draw, d, [vx, vy, vz]);
+    for f in FACES {
+        quads.push(mod_api::WorldQuad::new(
+            [
+                [x + f[0][0], y + f[0][1], z + f[0][2]],
+                [x + f[1][0], y + f[1][1], z + f[1][2]],
+                [x + f[2][0], y + f[2][1], z + f[2][2]],
+                [x + f[3][0], y + f[3][1], z + f[3][2]],
+            ],
+            color,
+            mod_api::WorldDepth::Tested,
+        ));
     }
-    draw.pop();
+}
+
+/// Java's red path line: a `WorldLine` through the centres of the
+/// upcoming path nodes — the geometry API has a real line primitive now.
+fn line_segment(lines: &mut Vec<mod_api::WorldLine>, a: [i32; 3], b: [i32; 3]) {
+    lines.push(mod_api::WorldLine::new(
+        [a[0] as f64 + 0.5, a[1] as f64 + 0.5, a[2] as f64 + 0.5],
+        [b[0] as f64 + 0.5, b[1] as f64 + 0.5, b[2] as f64 + 0.5],
+        LINE_ARGB,
+        LINE_W,
+        mod_api::WorldDepth::Tested,
+    ));
 }
 
 /// `native_visuals`: path crumbs, goal rim, waypoint rims.
 pub fn visuals(
     game: &crate::game::Game<'_>,
-    rims: &mut Vec<crate::game::native_hooks::NativeBlockRim>,
-    lights: &mut Vec<crate::game::native_hooks::NativeColoredLight>,
+    rims: &mut Vec<mod_api::BlockRim>,
+    lights: &mut Vec<mod_api::ColoredLight>,
 ) {
     if !on(game) {
         return;
@@ -345,30 +278,18 @@ pub fn visuals(
     // on the world canvas in `world`.
     if goal_on {
         for t in targets(game) {
-            rims.push(NativeBlockRim {
-                pos: t,
-                argb: TARGET_RIM,
-                width: TARGET_W,
-            });
+            rims.push(mod_api::BlockRim::new(t, TARGET_RIM, TARGET_W));
         }
         // Goal: the process's objective cell, else the last path node.
         let goal = rt::with(|s| s.objective.or_else(|| s.path.last().map(|m| m.pos)));
         if let Some(g) = goal {
-            rims.push(NativeBlockRim {
-                pos: g,
-                argb: GOAL_ARGB,
-                width: GOAL_W,
-            });
+            rims.push(mod_api::BlockRim::new(g, GOAL_ARGB, GOAL_W));
         }
     }
     if wp_on {
         with(|s| {
             for (_, pos) in s.wps.iter().take(MAX_WPS) {
-                rims.push(NativeBlockRim {
-                    pos: *pos,
-                    argb: WP_ARGB,
-                    width: WP_W,
-                });
+                rims.push(mod_api::BlockRim::new(*pos, WP_ARGB, WP_W));
             }
         });
     }
@@ -376,17 +297,20 @@ pub fn visuals(
     let _ = lights;
 }
 
-/// `native_world_submit`: the red path line, translucent fills on break
-/// targets and the goal, and waypoint name labels.
+/// `native_submit_custom_geometry`: the red path line, translucent fills
+/// on break targets and the goal, and waypoint name labels.
 pub fn world(
     game: &crate::game::Game<'_>,
-    draw: &mut crate::mod_api::NativeWorldDraw,
+    _view: &mod_api::WorldRenderView,
+    draw: &mut horizon_client::world_geometry::WorldGeometry,
 ) {
     if !on(game) {
         return;
     }
+    let mut lines: Vec<mod_api::WorldLine> = Vec::new();
+    let mut quads: Vec<mod_api::WorldQuad> = Vec::new();
     // Java's `renderPath`: a solid red line through the centres of the
-    // upcoming path nodes (a thin cube per segment — no line primitive).
+    // upcoming path nodes.
     if with(|s| s.path) {
         let cells = rt::with(|s| {
             s.path
@@ -397,17 +321,17 @@ pub fn world(
                 .collect::<Vec<_>>()
         });
         for w in cells.windows(2) {
-            line_segment(game, draw, w[0], w[1]);
+            line_segment(&mut lines, w[0], w[1]);
         }
     }
     if with(|s| s.goal) {
         // Green fills on blocks queued to break, white fill on the goal.
         for t in targets(game) {
-            fill_box(game, draw, t, TARGET_FILL);
+            fill_box(&mut quads, t, TARGET_FILL_ARGB);
         }
         let goal = rt::with(|s| s.objective.or_else(|| s.path.last().map(|m| m.pos)));
         if let Some(g) = goal {
-            fill_box(game, draw, g, GOAL_FILL);
+            fill_box(&mut quads, g, GOAL_FILL_ARGB);
         }
     }
     let wps = with(|s| {
@@ -418,26 +342,92 @@ pub fn world(
         }
     });
     for (name, pos) in wps {
-        draw.push();
-        // Flat on the bottom face level of the marked cell — the floor top
-        // when the marker is a feet cell — glyph top facing north.
-        if draw.translate_world([
-            f64::from(pos[0]) + 0.5,
-            f64::from(pos[1]) + 0.01,
-            f64::from(pos[2]) + 0.5,
-        ]) {
-            draw.rotate_about([1.0, 0.0, 0.0], 90.0, [0.0, 0.0, 0.0]);
-            draw.scale([SCALE, SCALE, SCALE]);
-            draw.translate([-2.5 * name.len() as f32, -4.0, 0.0]);
-            game.native_world_text(
-                draw,
-                &Text::literal(name),
-                WP_TEXT,
-                Some(OUTLINE),
-            );
-        }
-        draw.pop();
+        label(&mut quads, &name, pos);
     }
+    let _ = draw.lines(&lines);
+    let _ = draw.quads(&quads);
+}
+
+/// A waypoint's name drawn flat on the marked cell, readable from above —
+/// `native_world_text` is gone, so each glyph is tiny quads of a 5x7
+/// bitmap font, like the light-level overlay's digits.
+fn label(quads: &mut Vec<mod_api::WorldQuad>, name: &str, pos: [i32; 3]) {
+    // Glyph cell size in blocks; the text sits centred on the cell top.
+    const PX: f64 = 0.09;
+    let width = name.len() as f64 * 6.0 * PX - PX;
+    let ox = pos[0] as f64 + 0.5 - width / 2.0;
+    let oy = pos[1] as f64 + 0.02;
+    let oz = pos[2] as f64 + 0.5 + 3.5 * PX;
+    for (i, c) in name.chars().enumerate() {
+        let Some(glyph) = glyph(c) else { continue };
+        for (col, bits) in glyph.iter().enumerate() {
+            for row in 0..7 {
+                if bits & (1 << row) == 0 {
+                    continue;
+                }
+                let x = ox + (i * 6 + col) as f64 * PX;
+                let z = oz - row as f64 * PX;
+                quads.push(mod_api::WorldQuad::new(
+                    [
+                        [x, oy, z - PX],
+                        [x + PX, oy, z - PX],
+                        [x + PX, oy, z],
+                        [x, oy, z],
+                    ],
+                    WP_TEXT,
+                    mod_api::WorldDepth::Tested,
+                ));
+            }
+        }
+    }
+}
+
+/// 5x7 bitmap glyphs (columns, bit 0 = top row) for waypoint names.
+fn glyph(c: char) -> Option<[u8; 5]> {
+    Some(match c.to_ascii_uppercase() {
+        'A' => [0x7E, 0x11, 0x11, 0x11, 0x7E],
+        'B' => [0x7F, 0x49, 0x49, 0x49, 0x36],
+        'C' => [0x3E, 0x41, 0x41, 0x41, 0x22],
+        'D' => [0x7F, 0x41, 0x41, 0x22, 0x1C],
+        'E' => [0x7F, 0x49, 0x49, 0x49, 0x41],
+        'F' => [0x7F, 0x09, 0x09, 0x09, 0x01],
+        'G' => [0x3E, 0x41, 0x49, 0x49, 0x7A],
+        'H' => [0x7F, 0x08, 0x08, 0x08, 0x7F],
+        'I' => [0x00, 0x41, 0x7F, 0x41, 0x00],
+        'J' => [0x20, 0x40, 0x41, 0x3F, 0x01],
+        'K' => [0x7F, 0x08, 0x14, 0x22, 0x41],
+        'L' => [0x7F, 0x40, 0x40, 0x40, 0x40],
+        'M' => [0x7F, 0x02, 0x0C, 0x02, 0x7F],
+        'N' => [0x7F, 0x04, 0x08, 0x10, 0x7F],
+        'O' => [0x3E, 0x41, 0x41, 0x41, 0x3E],
+        'P' => [0x7F, 0x09, 0x09, 0x09, 0x06],
+        'Q' => [0x3E, 0x41, 0x51, 0x21, 0x5E],
+        'R' => [0x7F, 0x09, 0x19, 0x29, 0x46],
+        'S' => [0x46, 0x49, 0x49, 0x49, 0x31],
+        'T' => [0x01, 0x01, 0x7F, 0x01, 0x01],
+        'U' => [0x3F, 0x40, 0x40, 0x40, 0x3F],
+        'V' => [0x1F, 0x20, 0x40, 0x20, 0x1F],
+        'W' => [0x3F, 0x40, 0x38, 0x40, 0x3F],
+        'X' => [0x63, 0x14, 0x08, 0x14, 0x63],
+        'Y' => [0x07, 0x08, 0x70, 0x08, 0x07],
+        'Z' => [0x61, 0x51, 0x49, 0x45, 0x43],
+        '0' => [0x3E, 0x51, 0x49, 0x45, 0x3E],
+        '1' => [0x00, 0x42, 0x7F, 0x40, 0x00],
+        '2' => [0x42, 0x61, 0x51, 0x49, 0x46],
+        '3' => [0x21, 0x41, 0x45, 0x4B, 0x31],
+        '4' => [0x18, 0x14, 0x12, 0x7F, 0x10],
+        '5' => [0x27, 0x45, 0x45, 0x45, 0x39],
+        '6' => [0x3C, 0x4A, 0x49, 0x49, 0x30],
+        '7' => [0x01, 0x71, 0x09, 0x05, 0x03],
+        '8' => [0x36, 0x49, 0x49, 0x49, 0x36],
+        '9' => [0x06, 0x49, 0x49, 0x29, 0x1E],
+        '-' => [0x08, 0x08, 0x08, 0x08, 0x08],
+        '_' => [0x40, 0x40, 0x40, 0x40, 0x40],
+        '.' => [0x00, 0x60, 0x60, 0x00, 0x00],
+        ':' => [0x00, 0x36, 0x36, 0x00, 0x00],
+        ' ' => return None,
+        _ => [0x7F, 0x41, 0x41, 0x41, 0x7F], // unknown: a box
+    })
 }
 
 /// `/b render <path|goal|waypoints> [on|off]`.
@@ -484,7 +474,7 @@ fn render_cmd(game: &mut Game<'_>, args: &[&str]) {
         *key_slot(s, key).unwrap() = new;
         new
     });
-    game.native_set_setting(rt::MOD_ID, key, if new { "true" } else { "false" });
+    game.set_setting(rt::MOD_ID, key, if new { "true" } else { "false" });
     game.native_chat(&format!("baritone: {label} {}", onoff(new)));
 }
 
@@ -530,7 +520,7 @@ pub fn click(game: &mut crate::game::Game<'_>, button: usize) -> bool {
         *slot = !*slot;
         *slot
     });
-    game.native_set_setting(rt::MOD_ID, key, if new { "true" } else { "false" });
+    game.set_setting(rt::MOD_ID, key, if new { "true" } else { "false" });
     true
 }
 

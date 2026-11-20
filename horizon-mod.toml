@@ -1,0 +1,179 @@
+id = "baritone"
+name = "Baritone"
+version = "0.5.0"
+description = "Automated movement: pathfinding, mining, building, farming, waypoints and elytra."
+authors = []
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "f00125f61f794aaa3d4e950d301f353b35b6ee3d"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+[[native.module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone"
+source = "src/runtime.rs"
+
+[[native.module]]
+id = "pathfind"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_pathfind"
+source = "src/pathfind.rs"
+
+[[native.module]]
+id = "sel"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_sel"
+source = "src/sel.rs"
+
+[[native.module]]
+id = "build"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_build"
+source = "src/build.rs"
+
+[[native.module]]
+id = "extras"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_extras"
+source = "src/extras.rs"
+
+[[native.module]]
+id = "farm"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_farm"
+source = "src/farm.rs"
+
+[[native.module]]
+id = "render"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_render"
+source = "src/render.rs"
+
+[[native.module]]
+id = "elytra"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_elytra"
+source = "src/elytra.rs"
+
+[[native.module]]
+id = "exec"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_exec"
+source = "src/exec.rs"
+
+[[native.module]]
+id = "names"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_names"
+source = "src/names.rs"
+
+[[native.module]]
+id = "glue"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_glue"
+source = "src/glue.rs"
+
+# Per-tick driver: the old `native_tick` was renamed `native_client_tick_pre`.
+[[native.mixin]]
+id = "tick"
+target = "horizon_client::game::native_hooks::client_tick_pre::Game::native_client_tick_pre"
+kind = "HEAD"
+helper = "src/mixins/tick.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+]
+
+# Movement input: the four axis refs now travel in `MovementInputCall`.
+[[native.mixin]]
+id = "input"
+target = "horizon_client::game::native_hooks::movement_input::Game::native_movement_input"
+kind = "OVERWRITE"
+helper = "src/mixins/input.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "&*self" },
+  { name = "call", ty = "mod_api::__private::MovementInputCall<'_>", value = "call" },
+]
+
+# Chat interception: `/b` lines run client-side before the server sees them.
+[[native.mixin]]
+id = "command"
+target = "horizon_client::game::native_hooks::base::Game::native_command"
+kind = "HEAD"
+helper = "src/mixins/command.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]
+
+# Usage grammar on the integrated server's tree (LAN/single-player
+# completion) — the old `native_register_commands`, `NativeCommand` renamed
+# to `mod_api::Command`.
+[[native.mixin]]
+id = "register_commands"
+target = "horizon_client::game::native_hooks::base::Game::native_register_commands"
+kind = "HEAD"
+helper = "src/mixins/register_commands.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+  { name = "commands", ty = "&mut Vec<mod_api::Command>", value = "&mut *commands" },
+]
+
+# The client-side tree (`native_commands`'s bare-name list became full
+# usages, so the chat box colours and completes real grammar).
+[[native.mixin]]
+id = "client_commands"
+target = "horizon_client::game::native_hooks::base::Game::native_register_client_commands"
+kind = "HEAD"
+helper = "src/mixins/client_commands.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+  { name = "commands", ty = "&mut Vec<mod_api::Command>", value = "&mut *commands" },
+]
+
+# Server-side completions (`native_tab_complete_v2` merged into
+# `native_tab_complete`, whose `label`/`arguments` pair is now the raw
+# `command` line).
+[[native.mixin]]
+id = "tab_complete"
+target = "horizon_client::game::native_hooks::base::Game::native_tab_complete"
+kind = "HEAD"
+helper = "src/mixins/tab_complete.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "range", ty = "[usize; 2]", value = "range" },
+  { name = "suggestions", ty = "&mut Vec<Suggestion>", value = "&mut *suggestions" },
+]
+
+# Block rims and colored lights (the `Native` prefix is gone from the types).
+[[native.mixin]]
+id = "visuals"
+target = "horizon_client::game::native_hooks::base::Game::native_visuals"
+kind = "HEAD"
+helper = "src/mixins/visuals.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "&*self" },
+  { name = "rims", ty = "&mut Vec<mod_api::BlockRim>", value = "&mut *rims" },
+  { name = "lights", ty = "&mut Vec<mod_api::ColoredLight>", value = "&mut *lights" },
+]
+
+# Path/goal/waypoint/selection drawing: `native_world_submit`'s sprite-quad
+# `NativeWorldDraw` became `WorldGeometry` with real line/quad primitives.
+[[native.mixin]]
+id = "world"
+target = "horizon_client::game::native_hooks::submit_custom_geometry::Game::native_submit_custom_geometry"
+kind = "HEAD"
+helper = "src/mixins/world.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "&*self" },
+  { name = "view", ty = "&mod_api::WorldRenderView", value = "view" },
+  { name = "draw", ty = "&mut horizon_client::world_geometry::WorldGeometry", value = "&mut *draw" },
+]

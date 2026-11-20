@@ -140,7 +140,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
     if !matches!(head.to_ascii_lowercase().as_str(), "sel" | "selection") {
         return false;
     }
-    if !game.native_on(rt::ID) || !game.native_window() {
+    if !rt::enabled(game) || !game.native_window() {
         return true;
     }
     sel(game, &args[1..]);

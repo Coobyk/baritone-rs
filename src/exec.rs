@@ -63,6 +63,7 @@ fn face_toward(game: &crate::game::Game<'_>, b: [i32; 3]) -> [i32; 3] {
 
 fn face_hit(cell: [i32; 3], face: [i32; 3]) -> crate::game::Hit {
     crate::game::Hit {
+        inside: false,
         pos: cell,
         face,
         point: [

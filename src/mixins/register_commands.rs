@@ -1,6 +1,6 @@
 fn baritone_register_commands(
-    game: &mut crate::game::Game<'_>,
-    commands: &mut Vec<crate::mod_api::NativeCommand>,
+    game: &mut Game<'_>,
+    commands: &mut Vec<mod_api::Command>,
 ) {
     crate::game::umbx_baritone_glue::register_commands(game, commands)
 }

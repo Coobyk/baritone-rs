@@ -145,7 +145,7 @@ fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
 }
 
 fn on(game: &crate::game::Game<'_>) -> bool {
-    game.native_on(rt::ID)
+    rt::enabled(game)
 }
 
 /// The window's own game, not the single player server's.
@@ -192,6 +192,7 @@ fn cell_dist2(a: [i32; 3], b: [i32; 3]) -> f64 {
 /// Right-click/attack hit on a cell's top face, centred on that face.
 fn hit_top(cell: [i32; 3]) -> crate::game::Hit {
     crate::game::Hit {
+        inside: false,
         pos: cell,
         face: [0, 1, 0],
         point: [
