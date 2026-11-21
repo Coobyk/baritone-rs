@@ -127,31 +127,11 @@ fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
     f(g.as_mut().unwrap())
 }
 
-fn on(game: &Game<'_>) -> bool {
-    rt::enabled(game)
-}
-
-fn client(game: &Game<'_>) -> bool {
-    game.native_window()
-}
-
-fn say(game: &mut Game<'_>, m: &str) {
-    game.native_chat(&format!("baritone: {m}"));
-}
-
-fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
-    [
-        p.position.x.floor() as i32,
-        p.position.y.floor() as i32,
-        p.position.z.floor() as i32,
-    ]
-}
-
 /// Blocks of air between the feet cell and the first solid block below,
 /// capped at 16 (unloaded columns read as air, i.e. "deep").
 fn clearance(game: &Game<'_>) -> i32 {
     let Some(p) = game.player.as_ref() else { return 16 };
-    let f = feet(p);
+    let f = rt::feet(p);
     let mut d = 0;
     while d < 16 && f[1] - 1 - d >= game.world.shape.min_y {
         let st = game.world.block(f[0], f[1] - 1 - d, f[2]);
@@ -204,18 +184,15 @@ fn finish(game: &mut Game<'_>, msg: &str) {
         s.want = rt::Want::default();
     });
     ex::apply(game, &rt::Want::default());
-    say(game, msg);
+    rt::say(game, msg);
 }
 
-/// `/b elytra [<x> <z>]` — the integrator hands us "head + args" per
-/// MODULES.md, but accept a bare `[x, z]` too so a sliced call still works.
+/// `/b elytra [<x> <z>]` — the head word must be ours; anything else
+/// returns false so other modules and the core can claim their args.
 pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
-    if !on(game) || !client(game) {
-        return false;
-    }
-    let args = match args.first() {
-        Some(&"elytra" | &"ely") => &args[1..],
-        _ => args,
+    let args = match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("elytra" | "ely") => &args[1..],
+        _ => return false,
     };
     match args {
         [] => {
@@ -230,7 +207,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
                     )
                 })
             });
-            say(game, &t.unwrap_or_else(|| "elytra: idle".to_owned()));
+            rt::say(game, &t.unwrap_or_else(|| "elytra: idle".to_owned()));
             true
         }
         [x, z] => {
@@ -241,11 +218,11 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
             let (flying, glider, gliding, grounded) =
                 (p.flying, p.glider, p.fall_flying, p.ground.on_ground);
             if flying {
-                say(game, "elytra: not while flying — land first");
+                rt::say(game, "elytra: not while flying — land first");
                 return true;
             }
             if !glider && !gliding {
-                say(game, "elytra: warning — no glider equipped, trying anyway");
+                rt::say(game, "elytra: warning — no glider equipped, trying anyway");
             }
             let phase = if gliding {
                 Phase::Glide
@@ -264,7 +241,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
                 s.halt();
                 s.busy = true;
             });
-            say(game, &format!("elytra: gliding toward {x} {z}"));
+            rt::say(game, &format!("elytra: gliding toward {x} {z}"));
             true
         }
         _ => false,
@@ -276,7 +253,7 @@ pub fn tick(game: &mut Game<'_>) {
     if !with(|s| s.active) {
         return;
     }
-    if !on(game) || !client(game) {
+    if !rt::enabled() || !game.native_window() {
         return;
     }
     // `/b stop` clears `busy`, and another `/b` process claims `proc`: either
@@ -382,7 +359,7 @@ pub fn tick(game: &mut Game<'_>) {
                             s.phase = Phase::Glide;
                             s.ticks = 0;
                         });
-                        say(game, "elytra: glide flag set directly (jump press missed)");
+                        rt::say(game, "elytra: glide flag set directly (jump press missed)");
                     } else if !glider {
                         finish(game, "elytra: no glider equipped — aborted");
                         return;
@@ -460,21 +437,6 @@ pub fn tick(game: &mut Game<'_>) {
 
     rt::with(|s| s.want = w);
     ex::apply(game, &w);
-}
-
-pub fn settings(_game: &Game<'_>, out: &mut Vec<String>) {
-    let t = with(|s| {
-        if s.active {
-            format!("flying to {} {}", s.goal[0], s.goal[1])
-        } else {
-            "idle".to_owned()
-        }
-    });
-    out.push(format!("Elytra: {t}"));
-}
-
-pub fn click(_game: &mut Game<'_>, button: usize) -> bool {
-    button == 0
 }
 
 pub fn help() -> &'static [&'static str] {

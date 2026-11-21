@@ -72,6 +72,14 @@ file = "crates/horizon-client/src/game.rs"
 name = "umbx_baritone_names"
 source = "src/names.rs"
 
+# The single settings table; also `include!`d into lib.rs so the mod
+# crate and the injected modules share it (same pattern as names.rs).
+[[native.module]]
+id = "settings"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_baritone_settings"
+source = "src/settings_table.rs"
+
 [[native.module]]
 id = "glue"
 file = "crates/horizon-client/src/game.rs"

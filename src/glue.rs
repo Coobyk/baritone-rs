@@ -11,13 +11,10 @@
 //   goal  path  pause  resume  stop  set  help   the rest
 
 use crate::game::umbx_baritone as rt;
+use crate::game::umbx_baritone_settings as st;
 use crate::game::umbx_pathfind as pf;
 use crate::game::umbx_baritone_exec as ex;
 use crate::game::Game;
-
-fn center(p: [i32; 3]) -> [f64; 3] {
-    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
-}
 
 /// `legitMine`'s line of sight: a voxel walk from `a` to `b` that is true
 /// only when the first fully-colliding cell it reaches is `b`'s own.
@@ -55,82 +52,6 @@ fn los(game: &Game<'_>, a: [f64; 3], b: [f64; 3]) -> bool {
     false
 }
 
-fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
-    [
-        p.position.x.floor() as i32,
-        p.position.y.floor() as i32,
-        p.position.z.floor() as i32,
-    ]
-}
-
-fn on(game: &Game<'_>) -> bool {
-    rt::enabled(game)
-}
-
-/// The window's own game, not the single player server's.
-fn client(game: &Game<'_>) -> bool {
-    game.native_window()
-}
-
-/// Where the player can stand from where they are: their cell, else the
-/// standable cell closest to it.
-fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
-    let w = pf::W::new(game);
-    let player = game.player.as_ref()?;
-    let feet = feet(player);
-    // Wherever the player's body actually is — physics truth beats the
-    // planner's standability model (fences, slabs and fresh placements all
-    // collide differently than they read). Picking a "standable" cell the
-    // player isn't in made the first move expect them somewhere else.
-    if w.body_open(feet) || w.water(feet) {
-        if player.ground.on_ground || w.floor(feet) || w.water(feet) {
-            return Some(feet);
-        }
-        // Airborne: feet() floors the mid-jump position a block high, so the
-        // plan would start from a cell the player doesn't stand on. Start
-        // from where they'll land instead.
-        for d in 1..=5 {
-            let p = [feet[0], feet[1] - d, feet[2]];
-            if w.floor(p) && w.body_open(p) {
-                return Some(p);
-            }
-        }
-        return Some(feet);
-    }
-    // Buried or otherwise unsound: fall back to the nearest standable cell.
-    for dy in -2..=2 {
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let p = [feet[0] + dx, feet[1] + dy, feet[2] + dz];
-                if w.standable(p) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    // In water there is no standable cell: start where we float and let Swim
-    // moves carry the route to shore.
-    if w.water(feet) {
-        return Some(feet);
-    }
-    // Buried with nothing standable nearby (suffocating in stone, wedged in
-    // gravel): start at the feet anyway — Break successors dig the body out.
-    // Returning None here left the process visibly frozen with no note.
-    Some(feet)
-}
-
-fn opts(s: &rt::State) -> pf::Opts {
-    rt::opts(s)
-}
-
-
-/// `native_commands`: names the chat box completes and colours.
-pub(super) fn commands(game: &Game<'_>, commands: &mut Vec<&'static str>) {
-    if on(game) && client(game) {
-        commands.extend(["b", "baritone"]);
-    }
-}
-
 /// `/b`/`baritone` usage strings pushed at `native_register_commands`: the
 /// integrated server merges them into the tree the chat box completes and
 /// colours, so subcommands and argument kinds show like vanilla's instead
@@ -146,6 +67,7 @@ const USAGES: &[&str] = &[
     " goto <x:integer> <y:integer> <z:integer>",
     " goto y <y:integer>",
     " g <x:integer> <z:integer>",
+    " g <x:integer> <y:integer> <z:integer>",
     " mine <blocks:baritone:blocks>",
     " mine <count:integer> <blocks:baritone:blocks>",
     " m <blocks:baritone:blocks>",
@@ -157,6 +79,7 @@ const USAGES: &[&str] = &[
     " f <target:word>",
     " explore [filter:baritone:blocks]",
     " e [filter:baritone:blocks]",
+    " tunnel <length:integer>",
     " tunnel [height:integer] [width:integer] [length:integer]",
     " t [height:integer] [width:integer] [length:integer]",
     " thisway [blocks:integer]",
@@ -165,13 +88,17 @@ const USAGES: &[&str] = &[
     " goal",
     " goal <x:integer> <z:integer>",
     " goal <x:integer> <y:integer> <z:integer>",
+    " goal clear",
     " path",
+    " repath",
     " invert",
     " pause",
     " resume",
+    " unpause",
     " stop",
     " cancel",
     " forcecancel",
+    " force_stop",
     " click",
     " click <button:baritone:click_button>",
     " set <key:baritone:setting> [value:baritone:bool_value]",
@@ -182,6 +109,8 @@ const USAGES: &[&str] = &[
     " wp save <name:word>",
     " wp goto <name:baritone:waypoint>",
     " wp delete <name:baritone:waypoint>",
+    " wp del <name:baritone:waypoint>",
+    " wp remove <name:baritone:waypoint>",
     " wp clear",
     " modified [setting:baritone:setting]",
     " reset <setting:baritone:setting>",
@@ -223,6 +152,8 @@ const USAGES: &[&str] = &[
     " farm <radius:integer>",
     " render",
     " render <target:baritone:render_target> [state:boolean]",
+    " draw",
+    " draw <target:baritone:render_target> [state:boolean]",
     " elytra",
     " elytra <x:integer> <z:integer>",
 ];
@@ -233,7 +164,7 @@ pub(super) fn client_commands(
     game: &mut Game<'_>,
     commands: &mut Vec<mod_api::Command>,
 ) {
-    if !on(game) {
+    if !rt::enabled() {
         return;
     }
     for usage in USAGES {
@@ -248,7 +179,7 @@ pub(super) fn register_commands(
     game: &mut Game<'_>,
     commands: &mut Vec<mod_api::Command>,
 ) {
-    if !on(game) {
+    if !rt::enabled() {
         return;
     }
     for usage in USAGES {
@@ -259,13 +190,6 @@ pub(super) fn register_commands(
         }
     }
 }
-
-/// Block names `/b mine`, `find`, `explore`, `blacklist`, `avoid` and
-/// `sel fill` complete. The block registry isn't enumerable through the
-/// mod surface, so this is the common set — every name the commands accept
-
-
-
 
 
 
@@ -286,11 +210,12 @@ fn schematic_names() -> Vec<String> {
             let Some(name) = e.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            let base = name
-                .strip_suffix(".schematic")
-                .or_else(|| name.strip_suffix(".schem"))
-                .unwrap_or(&name)
-                .to_owned();
+            // The loader opens `.schematic` files only — don't complete
+            // names it could never read.
+            let Some(base) = name.strip_suffix(".schematic") else {
+                continue;
+            };
+            let base = base.to_owned();
             if !out.contains(&base) {
                 out.push(base);
             }
@@ -404,99 +329,9 @@ pub(super) fn tab_complete(
     }
 }
 
-/// `native_settings`: buttons mirroring the toggles.
-pub(super) fn page(game: &Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
-    if mod_id != rt::ID {
-        return;
-    }
-    let set = rt::with(|s| s.set);
-    buttons.extend([
-        format!("Sprint: {}", if set.sprint { "on" } else { "off" }),
-        format!("Allow break: {}", if set.allow_break { "on" } else { "off" }),
-        format!("Allow place: {}", if set.allow_place { "on" } else { "off" }),
-        format!(
-            "Allow parkour: {}",
-            if set.allow_parkour { "on" } else { "off" }
-        ),
-        format!("Max drop: {}", set.max_drop),
-        format!("Mine radius: {}", set.mine_radius),
-        format!("Paused: {}", if set.pause { "yes" } else { "no" }),
-        "Stop".to_owned(),
-        "Commands: /b help in chat".to_owned(),
-    ]);
-    crate::game::umbx_baritone_sel::settings(game, buttons);
-    crate::game::umbx_baritone_build::settings(game, buttons);
-    crate::game::umbx_baritone_extras::settings(game, buttons);
-    crate::game::umbx_baritone_farm::settings(game, buttons);
-    crate::game::umbx_baritone_render::settings(game, buttons);
-    crate::game::umbx_baritone_elytra::settings(game, buttons);
-}
-
-/// `native_settings_click`: the buttons' actions, in `page` order.
-pub(super) fn click(game: &mut Game<'_>, mod_id: &str, button: usize) {
-    if mod_id != rt::ID {
-        return;
-    }
-    match button {
-        0 => rt::with(|s| s.set.sprint = !s.set.sprint),
-        1 => rt::with(|s| s.set.allow_break = !s.set.allow_break),
-        2 => rt::with(|s| s.set.allow_place = !s.set.allow_place),
-        3 => rt::with(|s| s.set.allow_parkour = !s.set.allow_parkour),
-        4 => rt::with(|s| s.set.max_drop = if s.set.max_drop >= 8 { 2 } else { s.set.max_drop + 1 }),
-        5 => rt::with(|s| {
-            s.set.mine_radius = if s.set.mine_radius >= 64 { 16 } else { s.set.mine_radius + 16 }
-        }),
-        6 => rt::with(|s| s.set.pause = !s.set.pause),
-        7 => rt::with(|s| s.halt()),
-        _ if button >= 9 => {
-            // Walk the module sections; each module's `settings` fixes its
-            // section size.
-            let mut at = button - 9;
-            for (s_fn, c_fn) in [
-                (
-                    crate::game::umbx_baritone_sel::settings
-                        as fn(&Game<'_>, &mut Vec<String>),
-                    crate::game::umbx_baritone_sel::click
-                        as fn(&mut Game<'_>, usize) -> bool,
-                ),
-                (
-                    crate::game::umbx_baritone_build::settings,
-                    crate::game::umbx_baritone_build::click,
-                ),
-                (
-                    crate::game::umbx_baritone_extras::settings,
-                    crate::game::umbx_baritone_extras::click,
-                ),
-                (
-                    crate::game::umbx_baritone_farm::settings,
-                    crate::game::umbx_baritone_farm::click,
-                ),
-                (
-                    crate::game::umbx_baritone_render::settings,
-                    crate::game::umbx_baritone_render::click,
-                ),
-                (
-                    crate::game::umbx_baritone_elytra::settings,
-                    crate::game::umbx_baritone_elytra::click,
-                ),
-            ] {
-                let mut tmp = Vec::new();
-                s_fn(game, &mut tmp);
-                if at < tmp.len() {
-                    c_fn(game, at);
-                    break;
-                }
-                at -= tmp.len();
-            }
-        }
-        _ => {}
-    }
-    save(game);
-}
-
 /// `native_command`: the `b`/`baritone` command tree.
 pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
-    if !on(game) || !client(game) {
+    if !rt::enabled() || !game.native_window() {
         return;
     }
     let mut words = command.split_whitespace();
@@ -541,12 +376,13 @@ pub(super) fn command(game: &mut Game<'_>, command: &str, ran: &mut bool) {
         }
         Some("spawn") => spawn(game),
         Some("click") => click_cmd(game, &args[1..]),
-        Some("set" | "s") => {
+        // `set`/`sprint` are real settings — extras' parser (the shared
+        // `SETTINGS` table) owns them end to end.
+        Some("set" | "s" | "sprint") => {
             if !crate::game::umbx_baritone_extras::command(game, &args) {
-                set(game, &args[1..])
+                rt::say(game, "/b set <setting> [value] — /b modified lists keys");
             }
         }
-        Some("sprint") => set(game, &["sprint", args.get(1).copied().unwrap_or("on")]),
         _ => {
             // Feature modules, in Baritone's command order.
             let handled = crate::game::umbx_baritone_sel::command(game, &args)
@@ -569,7 +405,7 @@ fn help(game: &mut Game<'_>) {
         "/b follow <entity> | player <name> | entity <type> | entities",
         "/b explore  /b tunnel <h> <w> [len]  /b thisway [n]  /b axis  /b spawn",
         "/b pause  /b resume  /b stop  /b path  /b click [left|right]",
-        "/b set <sprint|break|place|parkour|drop|radius|drops> [v]",
+        "/b set <setting> [value]  /b modified  /b reset <setting>",
     ] {
         game.native_chat(&format!("baritone: {line}"));
     }
@@ -587,10 +423,6 @@ fn help(game: &mut Game<'_>) {
     }
 }
 
-fn say(game: &mut Game<'_>, m: &str) {
-    game.native_chat(&format!("baritone: {m}"));
-}
-
 /// `~`, `~N`, `~-N`, or an absolute int — Baritone's relative coordinate.
 fn coord(a: &str, base: i32) -> Option<i32> {
     if let Some(rel) = a.strip_prefix('~') {
@@ -603,7 +435,7 @@ fn coord(a: &str, base: i32) -> Option<i32> {
 }
 
 fn goto(game: &mut Game<'_>, args: &[&str]) {
-    let Some(me) = game.player.as_ref().map(feet) else {
+    let Some(me) = game.player.as_ref().map(rt::feet) else {
         return;
     };
     let c = |a: &str, i: usize| coord(a, me[i]);
@@ -615,7 +447,7 @@ fn goto(game: &mut Game<'_>, args: &[&str]) {
         ["y", y] => {
             if let Some(y) = c(y, 1) {
                 rt::with(|s| s.begin(rt::Proc::YLevel { y }));
-                say(game, &format!("going to y={y}"));
+                rt::say(game, &format!("going to y={y}"));
                 return;
             }
             None
@@ -625,7 +457,7 @@ fn goto(game: &mut Game<'_>, args: &[&str]) {
                 // GoalXZ: don't resolve the column up-front — it may be far
                 // away and unloaded; any standable cell in it counts.
                 rt::with(|s| s.begin(rt::Proc::GotoXZ { x, z }));
-                say(game, &format!("going to {x} {z}"));
+                rt::say(game, &format!("going to {x} {z}"));
                 return;
             }
             _ => None,
@@ -635,18 +467,18 @@ fn goto(game: &mut Game<'_>, args: &[&str]) {
     match goal {
         Some(goal) => {
             rt::with(|s| s.begin(rt::Proc::Goto { goal }));
-            say(
+            rt::say(
                 game,
                 &format!("going to {} {} {}", goal[0], goal[1], goal[2]),
             );
         }
-        None => say(game, "/b goto <x> <z> | <x> <y> <z> | y <y>"),
+        None => rt::say(game, "/b goto <x> <z> | <x> <y> <z> | y <y>"),
     }
 }
 
 fn mine(game: &mut Game<'_>, args: &[&str]) {
     if args.is_empty() {
-        say(game, "/b mine [n] <block> — e.g. /b mine 5 log,diamond_ore");
+        rt::say(game, "/b mine [n] <block> — e.g. /b mine 5 log,diamond_ore");
         return;
     }
     // Upstream `mine <count> <block>`: a leading integer is the quantity.
@@ -657,11 +489,11 @@ fn mine(game: &mut Game<'_>, args: &[&str]) {
     let names: Vec<String> = rest
         .iter()
         .flat_map(|a| a.split(','))
-        .map(|n| n.trim_start_matches("minecraft:").to_ascii_lowercase())
+        .map(|n| rt::norm(n))
         .filter(|n| !n.is_empty())
         .collect();
     if names.is_empty() {
-        say(game, "/b mine [n] <block>");
+        rt::say(game, "/b mine [n] <block>");
         return;
     }
     let have0 = inv_count(game, &item_names_for(&names));
@@ -671,13 +503,13 @@ fn mine(game: &mut Game<'_>, args: &[&str]) {
         s.mine_done = 0;
         s.mine_have0 = have0;
         s.drop_ban.clear();
-        s.begin(rt::Proc::Mine { next: 0 });
+        s.begin(rt::Proc::Mine);
     });
     let what = names.join(", ");
     if want > 0 {
-        say(game, &format!("mining {want} of {what}"));
+        rt::say(game, &format!("mining {want} of {what}"));
     } else {
-        say(game, &format!("mining {what}"));
+        rt::say(game, &format!("mining {what}"));
     }
 }
 
@@ -690,24 +522,24 @@ fn follow(game: &mut Game<'_>, args: &[&str]) {
         ["entities"] => (3u8, String::new()),
         [name, ..] => (0u8, (*name).to_string()),
         [] => {
-            say(
+            rt::say(
                 game,
                 "/b follow <entity> | player <name> | entity <type> | entities",
             );
             return;
         }
     };
-    let name = name.trim_start_matches("minecraft:").to_ascii_lowercase();
+    let name = rt::norm(&name);
     rt::with(|s| {
         s.follow_name = name.clone();
         s.follow_mode = mode;
         s.begin(rt::Proc::Follow);
     });
     match mode {
-        1 => say(game, &format!("following player {name}")),
-        2 => say(game, &format!("following entity {name}")),
-        3 => say(game, "following entities"),
-        _ => say(game, &format!("following {name}")),
+        1 => rt::say(game, &format!("following player {name}")),
+        2 => rt::say(game, &format!("following entity {name}")),
+        3 => rt::say(game, "following entities"),
+        _ => rt::say(game, &format!("following {name}")),
     }
 }
 
@@ -718,7 +550,7 @@ fn explore(game: &mut Game<'_>, args: &[&str]) {
     let names: Vec<String> = args
         .iter()
         .flat_map(|a| a.split(','))
-        .map(|n| n.trim_start_matches("minecraft:").to_ascii_lowercase())
+        .map(|n| rt::norm(n))
         .filter(|n| !n.is_empty())
         .collect();
     let filtered = !names.is_empty()
@@ -734,9 +566,9 @@ fn explore(game: &mut Game<'_>, args: &[&str]) {
         s.begin(rt::Proc::Explore);
     });
     if filtered {
-        say(game, &format!("exploring for {}", names.join(", ")));
+        rt::say(game, &format!("exploring for {}", names.join(", ")));
     } else {
-        say(game, "exploring");
+        rt::say(game, "exploring");
     }
 }
 
@@ -745,7 +577,7 @@ fn tunnel(game: &mut Game<'_>, args: &[&str]) {
     // A bare number stays our length shorthand (`tunnel 50` = 1×2 for 50).
     let ints: Vec<i32> = args.iter().filter_map(|a| a.parse::<i32>().ok()).collect();
     if !args.is_empty() && ints.is_empty() {
-        say(game, "/b tunnel [height] [width] [length] — integers only");
+        rt::say(game, "/b tunnel [height] [width] [length] — integers only");
         return;
     }
     let (h, w, len) = match ints.as_slice() {
@@ -769,7 +601,7 @@ fn tunnel(game: &mut Game<'_>, args: &[&str]) {
         s.tunnel_size = [w, h];
         s.begin(rt::Proc::Tunnel { left: len });
     });
-    say(game, &format!("tunnelling {w}x{h} for {len} blocks"));
+    rt::say(game, &format!("tunnelling {w}x{h} for {len} blocks"));
 }
 
 /// `spawn`: path to the world spawn (upstream's `spawn` — the level's spawn
@@ -788,9 +620,9 @@ fn spawn(game: &mut Game<'_>) {
     match goal {
         Some(g) => {
             rt::with(|s| s.begin(rt::Proc::GotoXZ { x: g[0], z: g[2] }));
-            say(game, &format!("going to spawn {} {}", g[0], g[2]));
+            rt::say(game, &format!("going to spawn {} {}", g[0], g[2]));
         }
-        None => say(game, "baritone: no spawn point known"),
+        None => rt::say(game, "baritone: no spawn point known"),
     }
 }
 
@@ -806,7 +638,7 @@ fn click_cmd(game: &mut Game<'_>, args: &[&str]) {
         s.click_left = l;
         s.click_right = r;
     });
-    say(game, "clicked");
+    rt::say(game, "clicked");
 }
 
 /// AutoEat: during a process, hold `right` on the best hotbar food once
@@ -898,11 +730,11 @@ fn thisway(game: &mut Game<'_>, args: &[&str]) {
     let goal = pf::column_top(&w, tx, tz, p.position.y.floor() as i32)
         .unwrap_or([tx, p.position.y.floor() as i32, tz]);
     rt::with(|s| s.begin(rt::Proc::Goto { goal }));
-    say(game, &format!("this way to {} {}", tx, tz));
+    rt::say(game, &format!("this way to {} {}", tx, tz));
 }
 
 fn axis(game: &mut Game<'_>) {
-    let Some(f) = game.player.as_ref().map(feet) else { return };
+    let Some(f) = game.player.as_ref().map(rt::feet) else { return };
     // Upstream's `axis` is GoalAxis: the nearest point on a diagonal — the
     // x=z or x=-z line (the Nether-highway axes).
     let d1 = (f[0] - f[2]).abs(); // distance-ish from the x=z line
@@ -915,7 +747,7 @@ fn axis(game: &mut Game<'_>) {
         (m, -m)
     };
     rt::with(|s| s.begin(rt::Proc::GotoXZ { x, z }));
-    say(game, &format!("to axis {x} {z}"));
+    rt::say(game, &format!("to axis {x} {z}"));
 }
 
 fn goal_info(game: &mut Game<'_>) {
@@ -924,90 +756,26 @@ fn goal_info(game: &mut Game<'_>) {
         rt::Proc::Goto { goal } => format!("goto {} {} {}", goal[0], goal[1], goal[2]),
         rt::Proc::GotoXZ { x, z } => format!("goto {x} {z}"),
         rt::Proc::YLevel { y } => format!("y level {y}"),
-        rt::Proc::Mine { .. } => format!("mine {}", s.mine_names.join(",")),
+        rt::Proc::Mine => format!("mine {}", s.mine_names.join(",")),
         rt::Proc::Follow => format!("follow {}", s.follow_name),
         rt::Proc::Explore => "explore".to_owned(),
         rt::Proc::Tunnel { left } => format!("tunnel, {left} left"),
     });
-    say(game, &format!("current goal: {t}"));
-}
-
-fn set(game: &mut Game<'_>, args: &[&str]) {
-    let Some(key) = args.first() else {
-        say(game, "/b set <sprint|break|place|parkour|drop|radius> [v]");
-        return;
-    };
-    let val = args.get(1).copied();
-    let flip = |b: bool, v: Option<&str>| match v.map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("off" | "false" | "no" | "0") => false,
-        Some("on" | "true" | "yes" | "1") => true,
-        Some(_) => b,
-        None => !b,
-    };
-    // Don't call back into the game (say) while the state Mutex is held.
-    let mut unknown = false;
-    rt::with(|s| match *key {
-        "sprint" => s.set.sprint = flip(s.set.sprint, val),
-        "break" | "allowbreak" | "allow_break" => s.set.allow_break = flip(s.set.allow_break, val),
-        "place" | "allowplace" | "allow_place" => s.set.allow_place = flip(s.set.allow_place, val),
-        "parkour" | "allowparkour" | "allow_parkour" => {
-            s.set.allow_parkour = flip(s.set.allow_parkour, val)
-        }
-        "drop" | "max_drop" | "maxdrop" => {
-            if let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) {
-                s.set.max_drop = (v as i32).clamp(1, 20);
-            }
-        }
-        "radius" | "mine_radius" | "mineradius" => {
-            if let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) {
-                s.set.mine_radius = (v as i32).clamp(8, 96);
-            }
-        }
-        "drops" | "mine_scan_drops" | "minescandroppeditems" => {
-            s.set.mine_scan_drops = flip(s.set.mine_scan_drops, val);
-        }
-        "exposed" | "onlyexposed" | "exposedores" | "allowonlyexposedores" => {
-            s.set.exposed_ores = flip(s.set.exposed_ores, val);
-        }
-        "follow_radius" | "followradius" => {
-            if let Some(v) = val.and_then(|v| v.parse::<i32>().ok()) {
-                s.set.follow_radius = v.clamp(0, 32);
-            }
-        }
-        _ => unknown = true,
-    });
-    if unknown {
-        say(game, &format!("unknown setting {key}"));
-    }
-    save(game);
-    let text = rt::with(|s| {
-        format!(
-            "sprint={} break={} place={} parkour={} drop={} radius={} drops={}",
-            s.set.sprint, s.set.allow_break, s.set.allow_place, s.set.allow_parkour,
-            s.set.max_drop, s.set.mine_radius, s.set.mine_scan_drops
-        )
-    });
-    say(game, &text);
-}
-
-fn save(game: &Game<'_>) {
-    for (k, v) in rt::to_save() {
-        game.set_setting(rt::MOD_ID, k, &v);
-    }
+    rt::say(game, &format!("current goal: {t}"));
 }
 
 /// `native_tick`: drive the active process.
 pub(super) fn tick(game: &mut Game<'_>) {
-    if !on(game) || !client(game) {
+    if !rt::enabled() || !game.native_window() {
         return;
     }
     // Note: `rt::load` takes the state lock itself — never nest it inside
     // `rt::with` (std Mutex is not reentrant; that deadlocks the tick).
     // Every persisted key reloads here — reading only the originals used to
     // silently revert the newer settings on every restart.
-    for k in rt::KEYS {
-        if let Some(v) = game.setting(rt::MOD_ID, k) {
-            rt::load(k, &v);
+    for spec in st::SETTINGS {
+        if let Some(v) = game.setting(rt::MOD_ID, spec.key) {
+            rt::load(spec.key, &v);
         }
     }
     // Refresh the throwaway check so this tick's plans can't emit place
@@ -1069,7 +837,7 @@ pub(super) fn tick(game: &mut Game<'_>) {
 /// them; the executor feeds inputs.
 fn driver(game: &mut Game<'_>) {
     let Some(player) = game.player.as_ref() else { return };
-    let me = feet(player);
+    let me = rt::feet(player);
     let grounded = player.ground.on_ground;
     let proc = rt::with(|s| s.proc);
     if proc == rt::Proc::None || rt::with(|s| s.set.pause) {
@@ -1087,7 +855,7 @@ fn driver(game: &mut Game<'_>) {
 
     // Processes with their own targeting pick an objective cell first.
     match proc {
-        rt::Proc::Mine { .. } => mine_step(game),
+        rt::Proc::Mine => mine_step(game),
         rt::Proc::Follow => follow_step(game),
         rt::Proc::Explore => explore_step(game),
         rt::Proc::Tunnel { .. } => tunnel_step(game),
@@ -1102,7 +870,7 @@ fn driver(game: &mut Game<'_>) {
         rt::Proc::Goto { goal } => Some(goal),
         rt::Proc::GotoXZ { x, z } => Some([x, me[1], z]),
         rt::Proc::YLevel { y } => Some([me[0], y, me[2]]),
-        rt::Proc::Mine { .. }
+        rt::Proc::Mine
         | rt::Proc::Follow
         | rt::Proc::Explore
         | rt::Proc::Tunnel { .. } => rt::with(|s| s.objective),
@@ -1122,7 +890,7 @@ fn driver(game: &mut Game<'_>) {
             _ => false,
         };
     if arrived {
-        say(game, "arrived");
+        rt::say(game, "arrived");
         rt::with(|s| s.halt());
         ex::apply(game, &rt::Want::default());
         return;
@@ -1132,16 +900,16 @@ fn driver(game: &mut Game<'_>) {
     // failure put us in a short back-off window.
     if rt::with(|s| s.at >= s.path.len() && s.plan_cd == 0) {
         let w = pf::W::new(game);
-        let Some(start) = start_cell(game) else { return };
-        let o = rt::with(|s| opts(s));
+        let Some(start) = rt::start_cell(game) else { return };
+        let o = rt::with(|s| rt::opts(s));
         let path = match proc {
             rt::Proc::YLevel { y } => {
                 pf::find(&w, start, goal, &o, |p, _| w.standable(p) && p[1] == y)
             }
-            rt::Proc::Mine { .. } | rt::Proc::Follow => {
+            rt::Proc::Mine | rt::Proc::Follow => {
                 // A dropped-item objective is a point to stand on; a block
                 // objective is reached by standing near it.
-                if rt::with(|s| s.drop_pickup) && matches!(proc, rt::Proc::Mine { .. }) {
+                if rt::with(|s| s.drop_pickup) && matches!(proc, rt::Proc::Mine) {
                     pf::find_partial(&w, start, goal, &o, |p, g| p == g, true)
                 } else {
                     pf::find_partial(&w, start, goal, &o, |p, _| {
@@ -1178,7 +946,7 @@ fn driver(game: &mut Game<'_>) {
                 // then break the block itself. Dropped-item objectives are
                 // walked onto, never broken.
                 let break_goal = match proc {
-                    rt::Proc::Mine { .. } => !rt::with(|s| s.drop_pickup),
+                    rt::Proc::Mine => !rt::with(|s| s.drop_pickup),
                     rt::Proc::Tunnel { .. } => rt::with(|s| s.excavate),
                     _ => false,
                 };
@@ -1186,7 +954,7 @@ fn driver(game: &mut Game<'_>) {
                     let stand = path.last().map(|m| m.pos).unwrap_or(start);
                     path.push(pf::Move {
                         pos: stand,
-                        kind: pf::Kind::Break { count: 1 },
+                        kind: pf::Kind::Break,
                         cells: vec![goal],
                     });
                 }
@@ -1205,7 +973,7 @@ fn driver(game: &mut Game<'_>) {
                 // An unreachable drop gets banned and skipped — the rescan
                 // picks the next candidate — instead of counting as a
                 // fatal plan failure that halts the mine.
-                if matches!(proc, rt::Proc::Mine { .. })
+                if matches!(proc, rt::Proc::Mine)
                     && rt::with(|s| s.drop_pickup)
                     && rt::with(|s| s.objective).is_some()
                 {
@@ -1235,7 +1003,7 @@ fn driver(game: &mut Game<'_>) {
                         s.plan_fails
                     });
                     if fails >= 6 {
-                        say(game, &format!("no path to {:?} — giving up", goal));
+                        rt::say(game, &format!("no path to {:?} — giving up", goal));
                         rt::with(|s| s.halt());
                     }
                 }
@@ -1327,7 +1095,7 @@ fn driver(game: &mut Game<'_>) {
                         _ => false,
                     };
                     if there {
-                        say(game, "arrived");
+                        rt::say(game, "arrived");
                         rt::with(|s| s.halt());
                     } else {
                         rt::with(|s| s.path.clear());
@@ -1348,7 +1116,7 @@ fn driver(game: &mut Game<'_>) {
                         s.vert_fails
                     });
                     if fails >= 5 {
-                        say(game, &format!("can't climb {:?} to {:?} — giving up", m.kind, m.pos));
+                        rt::say(game, &format!("can't climb {:?} to {:?} — giving up", m.kind, m.pos));
                         rt::with(|s| s.halt());
                     }
                 } else {
@@ -1397,13 +1165,13 @@ fn driver(game: &mut Game<'_>) {
         }
         s.stuck
     });
-    if stuck >= 40 && stuck < 120 && !rt::with(|s| s.replanned) {
+    if stuck >= rt::REPLAN_TICKS && stuck < rt::STUCK_TICKS && !rt::with(|s| s.replanned) {
         rt::with(|s| {
             s.replanned = true;
             s.path.clear();
         });
-    } else if stuck >= 120 {
-        say(game, "stuck — giving up");
+    } else if stuck >= rt::STUCK_TICKS {
+        rt::say(game, "stuck — giving up");
         rt::with(|s| s.halt());
     }
 
@@ -1464,14 +1232,16 @@ fn item_names_for(names: &[String]) -> Vec<String> {
 
 /// Total count of matching item stacks across the whole inventory (Java's
 /// `mine` quota counts items gained, so a drop lost to lava doesn't).
+/// Matching is exact on the item id tail — `charcoal`/`coal_block` must
+/// not count toward `mine coal`.
 fn inv_count(game: &Game<'_>, names: &[String]) -> i64 {
     game.inventory
         .iter()
         .flatten()
         .filter(|st| st.count > 0)
         .map(|st| {
-            let n = st.item.trim_start_matches("minecraft:");
-            if names.iter().any(|m| n.contains(m.as_str())) {
+            let n = rt::tail(&st.item);
+            if names.iter().any(|m| n == m.as_str()) {
                 st.count as i64
             } else {
                 0
@@ -1480,10 +1250,11 @@ fn inv_count(game: &Game<'_>, names: &[String]) -> i64 {
         .sum()
 }
 
-/// Does the dropped-item entity `it` match any name in `names`?
+/// Does the dropped-item entity `it` match any name in `names`? Exact on
+/// the item id tail, like `inv_count`.
 fn drop_matches(it: &crate::entities::ItemEntity, names: &[String]) -> bool {
-    let n = it.stack.item.trim_start_matches("minecraft:");
-    names.iter().any(|m| n.contains(m.as_str()))
+    let n = rt::tail(&it.stack.item);
+    names.iter().any(|m| n == m.as_str())
 }
 
 /// Mine: keep `s.objective` on the nearest matching block in the radius; a
@@ -1511,7 +1282,7 @@ fn mine_step(game: &mut Game<'_>) {
         let done = (inv_count(game, &item_names) - have0).max(0) as u32;
         rt::with(|s| s.mine_done = done);
         if done >= want_q {
-            say(game, &format!("mined {} — done", done));
+            rt::say(game, &format!("mined {} — done", done));
             rt::with(|s| s.halt());
             return;
         }
@@ -1524,7 +1295,7 @@ fn mine_step(game: &mut Game<'_>) {
         s.drop_ban.retain(|b| b.1 > 0);
     });
     let Some(player) = game.player.as_ref() else { return };
-    let me = feet(player);
+    let me = rt::feet(player);
     let eye = [
         player.position.x,
         player.position.y + 1.62,
@@ -1625,18 +1396,11 @@ fn mine_step(game: &mut Game<'_>) {
                 // `allowOnlyExposedOres`: skip cells sealed on all six faces —
                 // a real miner can't have seen them.
                 if exposed
-                    && ![
-                        [1, 0, 0],
-                        [-1, 0, 0],
-                        [0, 0, 1],
-                        [0, 0, -1],
-                        [0, 1, 0],
-                        [0, -1, 0],
-                    ]
-                    .iter()
-                    .any(|o| {
-                        w.open_cell([p[0] + o[0], p[1] + o[1], p[2] + o[2]])
-                    })
+                    && !rt::SIX_DIRS
+                        .iter()
+                        .any(|o| {
+                            w.open_cell([p[0] + o[0], p[1] + o[1], p[2] + o[2]])
+                        })
                 {
                     continue;
                 }
@@ -1646,7 +1410,7 @@ fn mine_step(game: &mut Game<'_>) {
                     if legit {
                         let seen = rt::with(|s| s.seen_ores.contains(&p));
                         if !seen {
-                            if !los(game, eye, center(p)) {
+                            if !los(game, eye, rt::center(p)) {
                                 continue;
                             }
                             rt::with(|s| {
@@ -1704,7 +1468,7 @@ fn mine_step(game: &mut Game<'_>) {
             }
         }
         None => {
-            say(game, "no more matching blocks in range — done mining");
+            rt::say(game, "no more matching blocks in range — done mining");
             rt::with(|s| s.halt());
         }
     }
@@ -1725,12 +1489,7 @@ fn follow_step(game: &mut Game<'_>) {
         if m.removed || !m.alive() {
             continue;
         }
-        let kind = m
-            .kind
-            .model
-            .name
-            .trim_start_matches("minecraft:")
-            .to_ascii_lowercase();
+        let kind = rt::norm(&m.kind.model.name);
         let custom = m
             .custom_name
             .as_deref()
@@ -1780,7 +1539,7 @@ fn follow_step(game: &mut Game<'_>) {
             }
         }
         None => {
-            say(game, &format!("no '{name}' in sight — stopped following"));
+            rt::say(game, &format!("no '{name}' in sight — stopped following"));
             rt::with(|s| s.halt());
         }
     }
@@ -1791,7 +1550,7 @@ fn follow_step(game: &mut Game<'_>) {
 /// column not yet visited.
 fn explore_step(game: &mut Game<'_>) {
     let Some(player) = game.player.as_ref() else { return };
-    let me = feet(player);
+    let me = rt::feet(player);
     // Reached the current point: clear it so the next leg is picked. The
     // driver otherwise keeps replanning an empty path to the same cell
     // until the stuck watchdog fires — explore stalled ~6s after every
@@ -1835,9 +1594,7 @@ fn explore_step(game: &mut Game<'_>) {
                     if !names.iter().any(|n| f.name.contains(n.as_str())) {
                         continue;
                     }
-                    for off in
-                        [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]
-                    {
+                    for off in rt::SIX_DIRS {
                         let c = [p[0] + off[0], p[1] + off[1], p[2] + off[2]];
                         if !w.standable(c)
                             || rt::with(|s| s.visited.contains(&(c[0], c[2])))
@@ -1878,7 +1635,7 @@ fn explore_step(game: &mut Game<'_>) {
             return;
         }
     }
-    say(game, "nowhere new to explore");
+    rt::say(game, "nowhere new to explore");
     rt::with(|s| s.halt());
 }
 
@@ -1916,7 +1673,7 @@ fn tunnel_cells(
 /// if the player is nudged sideways mid-dig.
 fn tunnel_step(game: &mut Game<'_>) {
     let Some(player) = game.player.as_ref() else { return };
-    let me = feet(player);
+    let me = rt::feet(player);
     let (dir, left, size) = rt::with(|s| {
         (
             s.tunnel_dir,
@@ -1929,7 +1686,7 @@ fn tunnel_step(game: &mut Game<'_>) {
         )
     });
     if left <= 0 {
-        say(game, "tunnel done");
+        rt::say(game, "tunnel done");
         rt::with(|s| s.halt());
         return;
     }
@@ -2016,7 +1773,7 @@ pub(super) fn movement_input(
     game: &Game<'_>,
     call: &mut mod_api::__private::MovementInputCall<'_>,
 ) {
-    if !on(game) || !client(game) {
+    if !rt::enabled() || !game.native_window() {
         return;
     }
     rt::with(|s| {

@@ -4,22 +4,17 @@
 // canvas, flat on the marked cell like gamma's light-level numbers (the
 // canvas culls back faces, so labels are invisible from below).
 //
-// Waypoints: the extras module owns `/b wp` and keeps its own statics — this
-// module keeps its OWN copy for drawing. `umbx_baritone_extras` SHOULD call
-// `umbx_baritone_render::note_waypoint(name, pos)` on every add/save and
-// `umbx_baritone_render::clear_waypoints()` on delete/clear; a snapshot is
-// available through `waypoints(&mut vec)`. If extras never calls these,
-// nothing breaks — markers just don't appear. As a fallback channel this
-// module also re-reads the `wp_list` setting on a slow cadence: when present
-// it is authoritative, format `name=x,y,z;name=x,y,z`.
+// Waypoints: the extras module owns `/b wp` and publishes the markers as
+// the `wp_list` setting (`name=x,y,z;name=x,y,z`); this module re-reads it
+// on a slow cadence and draws a rim + name label per entry.
 //
 // `/b render <path|goal|waypoints> [on|off]` toggles each layer; the flags
 // persist as `render_path` / `render_goal` / `render_waypoints`.
 
 use std::sync::Mutex;
 
-use mod_api::BlockRim;
 use crate::game::umbx_baritone as rt;
+use crate::game::umbx_pathfind as pf;
 use crate::game::Game;
 
 
@@ -29,10 +24,14 @@ const LINE_ARGB: u32 = 0xFF_FF_00_00;
 /// Line width in screen pixels.
 const LINE_W: f32 = 2.0;
 /// Blocks queued to break / the mine objective: translucent green fill and
-/// wireframe rim, like Java's blocks-to-mine highlight.
+/// wireframe rim, like Java's blocksToBreak highlight.
 const TARGET_FILL_ARGB: u32 = 0x48_00_FF_3C;
 const TARGET_RIM: u32 = 0xFF_00_FF_3C;
 const TARGET_W: f32 = 2.0;
+/// Cells queued to place on (Pillar/Bridge/Traverse/ParkourPlace floors):
+/// Java's blocksToPlace highlight in orange, distinct from break's green.
+const PLACE_FILL_ARGB: u32 = 0x48_FF_88_00;
+const PLACE_RIM: u32 = 0xFF_FF_88_00;
 /// Objective cell: translucent white fill + rim, like Java's goal box.
 const GOAL_FILL_ARGB: u32 = 0x40_FF_FF_FF;
 const GOAL_ARGB: u32 = 0xFF_22_CC_88;
@@ -57,7 +56,7 @@ struct S {
     /// Persisted keys were read at least once.
     loaded: bool,
     syncs: u32,
-    /// `(name, cell)` waypoint markers, fed by extras via `note_waypoint`.
+    /// `(name, cell)` waypoint markers, fed by extras' `wp_list` setting.
     wps: Vec<(String, [i32; 3])>,
 }
 
@@ -79,7 +78,7 @@ fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
 }
 
 fn on(game: &Game<'_>) -> bool {
-    rt::enabled(game) && game.native_window()
+    rt::enabled() && game.native_window()
 }
 
 fn onoff(b: bool) -> &'static str {
@@ -154,65 +153,43 @@ fn sync(game: &Game<'_>) {
     });
 }
 
-// ---- extras-facing waypoint store ------------------------------------
-
-/// Record/replace a waypoint marker. `umbx_baritone_extras` should call
-/// this from `/b wp save ...` (same name overwrites).
-pub fn note_waypoint(name: &str, pos: [i32; 3]) {
-    let name = name.trim();
-    if name.is_empty() {
-        return;
-    }
-    with(|s| {
-        if let Some(e) = s.wps.iter_mut().find(|(n, _)| n.as_str() == name) {
-            e.1 = pos;
-        } else if s.wps.len() < MAX_WPS {
-            s.wps.push((name.to_owned(), pos));
-        }
-    });
-}
-
-/// Drop every stored marker. `umbx_baritone_extras` should call this from
-/// `/b wp clear` (and `note_waypoint` re-adds what's kept).
-pub fn clear_waypoints() {
-    with(|s| s.wps.clear());
-}
-
-/// Snapshot the stored markers: `let mut v = Vec::new(); waypoints(&mut v);`
-pub fn waypoints(out: &mut Vec<(String, [i32; 3])>) {
-    with(|s| out.extend(s.wps.iter().cloned()));
-}
-
 // ---- module contract --------------------------------------------------
 
-/// Solid blocks the process wants broken right now: every queued `Break`
-/// cell plus the current objective — Java's blocks-to-mine set, capped.
-fn targets(game: &Game<'_>) -> Vec<[i32; 3]> {
-    let (cells, objective) = rt::with(|s| {
-        (
-            s.path
-                .iter()
-                .skip(s.at)
-                .flat_map(|m| m.cells.iter().copied())
-                .collect::<Vec<_>>(),
-            s.objective,
-        )
-    });
-    let mut out: Vec<[i32; 3]> = objective.into_iter().collect();
-    for c in cells {
-        if out.len() >= MAX_TARGETS {
-            break;
+/// Cells the remaining path moves will break vs place, split by `kind` —
+/// Java's blocksToBreak/blocksToPlace sets. Kind, not a world-solid read,
+/// so soft breakables (flowers, grass) draw and freshly-placed floors
+/// don't vanish the tick the block lands. The process's objective cell
+/// counts as a break target.
+fn targets() -> (Vec<[i32; 3]>, Vec<[i32; 3]>) {
+    let (breaks, mut places, objective) = rt::with(|s| {
+        let mut b: Vec<[i32; 3]> = Vec::new();
+        let mut p: Vec<[i32; 3]> = Vec::new();
+        for m in s.path.iter().skip(s.at) {
+            let dst = match m.kind {
+                pf::Kind::Break | pf::Kind::Downward => &mut b,
+                pf::Kind::Pillar
+                | pf::Kind::Bridge
+                | pf::Kind::Traverse
+                | pf::Kind::ParkourPlace { .. } => &mut p,
+                _ => continue,
+            };
+            for c in m.cells.iter().copied() {
+                if !dst.contains(&c) {
+                    dst.push(c);
+                }
+            }
         }
-        let solid = game
-            .res
-            .facts()
-            .get(game.world.block(c[0], c[1], c[2]))
-            .full_collision;
-        if solid && !out.contains(&c) {
-            out.push(c);
+        (b, p, s.objective)
+    });
+    let mut breaks = breaks;
+    if let Some(o) = objective {
+        if !breaks.contains(&o) {
+            breaks.push(o);
         }
     }
-    out
+    breaks.truncate(MAX_TARGETS);
+    places.truncate(MAX_TARGETS);
+    (breaks, places)
 }
 
 /// A translucent filled box on `cell` — six two-sided quads, grown
@@ -273,12 +250,16 @@ pub fn visuals(
     if !path_on && !goal_on && !wp_on {
         return;
     }
-    // Blocks to break (mine objectives and queued Break cells): the green
-    // wireframe part of Java's blocks-to-mine highlight; the fill is drawn
-    // on the world canvas in `world`.
+    // Break/place queues (mine objectives and queued cells): the wireframe
+    // part of Java's blocksToBreak/blocksToPlace highlights; the fills are
+    // drawn on the world canvas in `world`.
     if goal_on {
-        for t in targets(game) {
+        let (breaks, places) = targets();
+        for t in breaks {
             rims.push(mod_api::BlockRim::new(t, TARGET_RIM, TARGET_W));
+        }
+        for t in places {
+            rims.push(mod_api::BlockRim::new(t, PLACE_RIM, TARGET_W));
         }
         // Goal: the process's objective cell, else the last path node.
         let goal = rt::with(|s| s.objective.or_else(|| s.path.last().map(|m| m.pos)));
@@ -325,9 +306,14 @@ pub fn world(
         }
     }
     if with(|s| s.goal) {
-        // Green fills on blocks queued to break, white fill on the goal.
-        for t in targets(game) {
+        // Green fills on blocks queued to break, orange on cells queued to
+        // place, white fill on the goal.
+        let (breaks, places) = targets();
+        for t in breaks {
             fill_box(&mut quads, t, TARGET_FILL_ARGB);
+        }
+        for t in places {
+            fill_box(&mut quads, t, PLACE_FILL_ARGB);
         }
         let goal = rt::with(|s| s.objective.or_else(|| s.path.last().map(|m| m.pos)));
         if let Some(g) = goal {
@@ -430,11 +416,8 @@ fn glyph(c: char) -> Option<[u8; 5]> {
     })
 }
 
-/// `/b render <path|goal|waypoints> [on|off]`.
+/// `/b render <path|goal|waypoints> [on|off]` (also `/b draw`).
 pub fn command(game: &mut crate::game::Game<'_>, args: &[&str]) -> bool {
-    if !on(game) {
-        return false;
-    }
     match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("render" | "draw") => {
             render_cmd(game, &args[1..]);
@@ -479,49 +462,11 @@ fn render_cmd(game: &mut Game<'_>, args: &[&str]) {
 }
 
 /// `native_tick`: settings sync only — drawing happens in the two hooks.
-/// Cheap early-out once every layer is off.
 pub fn tick(game: &mut crate::game::Game<'_>) {
     if !on(game) {
         return;
     }
     sync(game);
-    if with(|s| !(s.path || s.goal || s.wps_on)) {
-        return;
-    }
-}
-
-/// Settings page labels, mirrors of the toggles (local indices 0..=2).
-pub fn settings(game: &crate::game::Game<'_>, out: &mut Vec<String>) {
-    if !on(game) {
-        return;
-    }
-    sync(game);
-    let (p, g, w) = with(|s| (s.path, s.goal, s.wps_on));
-    out.extend([
-        format!("Path overlay: {}", onoff(p)),
-        format!("Goal marker: {}", onoff(g)),
-        format!("Waypoint markers: {}", onoff(w)),
-    ]);
-}
-
-/// Consume clicks on our three buttons (local indices 0..=2).
-pub fn click(game: &mut crate::game::Game<'_>, button: usize) -> bool {
-    if !on(game) {
-        return false;
-    }
-    let key = match button {
-        0 => "render_path",
-        1 => "render_goal",
-        2 => "render_waypoints",
-        _ => return false,
-    };
-    let new = with(|s| {
-        let slot = key_slot(s, key).unwrap();
-        *slot = !*slot;
-        *slot
-    });
-    game.set_setting(rt::MOD_ID, key, if new { "true" } else { "false" });
-    true
 }
 
 /// `/b help` contribution.

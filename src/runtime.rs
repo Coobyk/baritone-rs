@@ -4,18 +4,17 @@
 
 use std::sync::Mutex;
 
+use crate::game::umbx_baritone_settings as st;
+use crate::game::umbx_pathfind as pf;
+
 /// `b`/`baritone` mod id, so settings land under `.horizon-mod-data/baritone/`.
 pub const MOD_ID: &str = "baritone";
-pub const ID: &str = MOD_ID;
-pub const VERSION: &str = match option_env!("CARGO_PKG_VERSION") { Some(v) => v, None => "2.0.0" };
 
 /// `native_on`'s replacement: whether this code mod is enabled in the
 /// instance's mod switches (`mod_index_on` tracks Options > Mods).
-pub fn enabled(_game: &crate::game::Game<'_>) -> bool {
-    mod_api::__private::mod_index(ID).is_some_and(mod_api::__private::mod_index_on)
+pub fn enabled() -> bool {
+    mod_api::__private::mod_index(MOD_ID).is_some_and(mod_api::__private::mod_index_on)
 }
-pub const DESCRIPTION: &str =
-    "Baritone-style pathing: goto, mine, follow, explore, tunnel";
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Proc {
@@ -27,7 +26,7 @@ pub enum Proc {
     /// GoalYLevel: any standable cell at this height.
     YLevel { y: i32 },
     /// Find and break matching blocks until none remain nearby.
-    Mine { next: usize },
+    Mine,
     /// Stay near a mob/guest.
     Follow,
     /// Walk to random reachable points.
@@ -103,6 +102,9 @@ pub struct Settings {
     pub tool_select: bool,
     /// `allowWalkOnBottomSlab`: slabs/stairs count as floors.
     pub bottom_slab: bool,
+    /// `/b pause`: session-only by design — not part of `SETTINGS`, so it
+    /// is never persisted (a persisted pause would freeze the mod on
+    /// every restart). `reset`/halt clear it in memory.
     pub pause: bool,
 }
 
@@ -212,6 +214,150 @@ pub struct State {
     pub has_throwaway: bool,
 }
 
+impl Settings {
+    /// Defaults straight from the shared `SETTINGS` table — one source for
+    /// `load`, `/b reset`, `/b modified` and the options page.
+    pub fn defaults() -> Self {
+        let mut set = Self {
+            sprint: false,
+            allow_break: false,
+            allow_place: false,
+            allow_parkour: false,
+            max_drop: 0,
+            mine_radius: 0,
+            mine_scan_drops: false,
+            exposed_ores: false,
+            follow_radius: 0,
+            legit_mine: false,
+            assume_water: false,
+            assume_lava: false,
+            mob_avoid_r: 0,
+            mob_avoid_c: 0.0,
+            parkour_place: false,
+            downward: false,
+            vines: false,
+            diag_ascend: false,
+            diag_descend: false,
+            assume_step: false,
+            sprint_water: false,
+            tool_select: false,
+            bottom_slab: false,
+            pause: false,
+        };
+        for spec in st::SETTINGS {
+            set.apply(spec, spec.default);
+        }
+        set
+    }
+
+    /// Store a persisted string for `spec`: the `native_setting` load path
+    /// and `/b reset` share it — unparseable numbers fall back to the
+    /// table default and everything clamps to the table range.
+    pub fn apply(&mut self, spec: &st::Setting, value: &str) {
+        if spec.toggle {
+            self.put_bool(spec.key, value == "true");
+        } else {
+            let v = value
+                .parse::<f64>()
+                .unwrap_or_else(|_| spec.default.parse().unwrap_or(0.0))
+                .clamp(spec.min, spec.max);
+            self.put_num(spec.key, v);
+        }
+    }
+
+    /// The value in its persisted string form (`to_save`, `/b modified`,
+    /// `/b set`'s read-back).
+    pub fn value(&self, key: &str) -> String {
+        match key {
+            "sprint" => self.sprint.to_string(),
+            "allow_break" => self.allow_break.to_string(),
+            "allow_place" => self.allow_place.to_string(),
+            "allow_parkour" => self.allow_parkour.to_string(),
+            "max_drop" => self.max_drop.to_string(),
+            "mine_radius" => self.mine_radius.to_string(),
+            "mine_scan_drops" => self.mine_scan_drops.to_string(),
+            "exposed_ores" => self.exposed_ores.to_string(),
+            "follow_radius" => self.follow_radius.to_string(),
+            "legit_mine" => self.legit_mine.to_string(),
+            "assume_water" => self.assume_water.to_string(),
+            "assume_lava" => self.assume_lava.to_string(),
+            "mob_avoid_r" => self.mob_avoid_r.to_string(),
+            "mob_avoid_c" => self.mob_avoid_c.to_string(),
+            "parkour_place" => self.parkour_place.to_string(),
+            "downward" => self.downward.to_string(),
+            "vines" => self.vines.to_string(),
+            "diag_ascend" => self.diag_ascend.to_string(),
+            "diag_descend" => self.diag_descend.to_string(),
+            "assume_step" => self.assume_step.to_string(),
+            "sprint_water" => self.sprint_water.to_string(),
+            "tool_select" => self.tool_select.to_string(),
+            "bottom_slab" => self.bottom_slab.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// A toggle's current value (`/b set`'s flip needs the old one).
+    pub fn flag(&self, key: &str) -> bool {
+        match key {
+            "sprint" => self.sprint,
+            "allow_break" => self.allow_break,
+            "allow_place" => self.allow_place,
+            "allow_parkour" => self.allow_parkour,
+            "mine_scan_drops" => self.mine_scan_drops,
+            "exposed_ores" => self.exposed_ores,
+            "legit_mine" => self.legit_mine,
+            "assume_water" => self.assume_water,
+            "assume_lava" => self.assume_lava,
+            "parkour_place" => self.parkour_place,
+            "downward" => self.downward,
+            "vines" => self.vines,
+            "diag_ascend" => self.diag_ascend,
+            "diag_descend" => self.diag_descend,
+            "assume_step" => self.assume_step,
+            "sprint_water" => self.sprint_water,
+            "tool_select" => self.tool_select,
+            "bottom_slab" => self.bottom_slab,
+            _ => false,
+        }
+    }
+
+    pub fn put_bool(&mut self, key: &str, v: bool) {
+        match key {
+            "sprint" => self.sprint = v,
+            "allow_break" => self.allow_break = v,
+            "allow_place" => self.allow_place = v,
+            "allow_parkour" => self.allow_parkour = v,
+            "mine_scan_drops" => self.mine_scan_drops = v,
+            "exposed_ores" => self.exposed_ores = v,
+            "legit_mine" => self.legit_mine = v,
+            "assume_water" => self.assume_water = v,
+            "assume_lava" => self.assume_lava = v,
+            "parkour_place" => self.parkour_place = v,
+            "downward" => self.downward = v,
+            "vines" => self.vines = v,
+            "diag_ascend" => self.diag_ascend = v,
+            "diag_descend" => self.diag_descend = v,
+            "assume_step" => self.assume_step = v,
+            "sprint_water" => self.sprint_water = v,
+            "tool_select" => self.tool_select = v,
+            "bottom_slab" => self.bottom_slab = v,
+            _ => {}
+        }
+    }
+
+    /// `v` is already clamped to the table range by the caller.
+    pub fn put_num(&mut self, key: &str, v: f64) {
+        match key {
+            "max_drop" => self.max_drop = v as i32,
+            "mine_radius" => self.mine_radius = v as i32,
+            "follow_radius" => self.follow_radius = v as i32,
+            "mob_avoid_r" => self.mob_avoid_r = v as i32,
+            "mob_avoid_c" => self.mob_avoid_c = v,
+            _ => {}
+        }
+    }
+}
+
 impl State {
     fn new() -> Self {
         Self {
@@ -245,32 +391,7 @@ impl State {
             drop_stall: 0,
             seen_ores: std::collections::HashSet::new(),
             want: Want::default(),
-            set: Settings {
-                sprint: true,
-                allow_break: true,
-                allow_place: true,
-                allow_parkour: true,
-                max_drop: 4,
-                mine_radius: 32,
-                exposed_ores: false,
-                follow_radius: 3,
-                legit_mine: false,
-                assume_water: false,
-                assume_lava: false,
-                mob_avoid_r: 0,
-                mob_avoid_c: 1.5,
-                parkour_place: false,
-                downward: true,
-                vines: true,
-                diag_ascend: false,
-                diag_descend: false,
-                assume_step: false,
-                sprint_water: true,
-                tool_select: true,
-                bottom_slab: true,
-                mine_scan_drops: true,
-                pause: false,
-            },
+            set: Settings::defaults(),
             visited: std::collections::HashSet::new(),
             explore_names: Vec::new(),
             rng: 0x9e3779b97f4a7c15,
@@ -340,7 +461,11 @@ impl State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
-/// Run `f` with the global state, creating it on first use.
+/// Run `f` with the global state, creating it on first use. Poison is
+/// tolerated (`into_inner`): a panicking command must not wedge the game
+/// loop's only state lock. The lock is NOT reentrant — callers that need
+/// the world (`pf::W::new`, `load`, `start_cell`) take it themselves, so
+/// never call those from inside `with`.
 pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if g.is_none() {
@@ -351,97 +476,21 @@ pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 
 /// `native_setting` read. Missing keys leave the defaults.
 pub fn load(name: &str, value: &str) {
-    with(|s| {
-        let set = &mut s.set;
-        match name {
-            "sprint" => set.sprint = value == "true",
-            "allow_break" => set.allow_break = value == "true",
-            "allow_place" => set.allow_place = value == "true",
-            "allow_parkour" => set.allow_parkour = value == "true",
-            "max_drop" => set.max_drop = value.parse().unwrap_or(4).clamp(1, 20),
-            "mine_radius" => set.mine_radius = value.parse().unwrap_or(32).clamp(8, 96),
-            "mine_scan_drops" => set.mine_scan_drops = value == "true",
-            "exposed_ores" => set.exposed_ores = value == "true",
-            "follow_radius" => set.follow_radius = value.parse().unwrap_or(3).clamp(0, 32),
-            "legit_mine" => set.legit_mine = value == "true",
-            "assume_water" => set.assume_water = value == "true",
-            "assume_lava" => set.assume_lava = value == "true",
-            "mob_avoid_r" => set.mob_avoid_r = value.parse().unwrap_or(0).clamp(0, 32),
-            "mob_avoid_c" => {
-                set.mob_avoid_c = value.parse::<f64>().unwrap_or(1.5).clamp(0.0, 100.0)
-            }
-            "parkour_place" => set.parkour_place = value == "true",
-            "downward" => set.downward = value == "true",
-            "vines" => set.vines = value == "true",
-            "diag_ascend" => set.diag_ascend = value == "true",
-            "diag_descend" => set.diag_descend = value == "true",
-            "assume_step" => set.assume_step = value == "true",
-            "sprint_water" => set.sprint_water = value == "true",
-            "tool_select" => set.tool_select = value == "true",
-            "bottom_slab" => set.bottom_slab = value == "true",
-            _ => {}
-        }
-    });
+    let Some(spec) = st::SETTINGS.iter().find(|s| s.key == name) else {
+        return;
+    };
+    with(|s| s.set.apply(spec, value));
 }
 
-/// Settings persisted through `native_setting`.
+/// Settings persisted through `native_setting`, in table order.
 pub fn to_save() -> Vec<(&'static str, String)> {
     with(|s| {
-        vec![
-            ("sprint", s.set.sprint.to_string()),
-            ("allow_break", s.set.allow_break.to_string()),
-            ("allow_place", s.set.allow_place.to_string()),
-            ("allow_parkour", s.set.allow_parkour.to_string()),
-            ("max_drop", s.set.max_drop.to_string()),
-            ("mine_radius", s.set.mine_radius.to_string()),
-            ("mine_scan_drops", s.set.mine_scan_drops.to_string()),
-            ("exposed_ores", s.set.exposed_ores.to_string()),
-            ("follow_radius", s.set.follow_radius.to_string()),
-            ("legit_mine", s.set.legit_mine.to_string()),
-            ("assume_water", s.set.assume_water.to_string()),
-            ("assume_lava", s.set.assume_lava.to_string()),
-            ("mob_avoid_r", s.set.mob_avoid_r.to_string()),
-            ("mob_avoid_c", s.set.mob_avoid_c.to_string()),
-            ("parkour_place", s.set.parkour_place.to_string()),
-            ("downward", s.set.downward.to_string()),
-            ("vines", s.set.vines.to_string()),
-            ("diag_ascend", s.set.diag_ascend.to_string()),
-            ("diag_descend", s.set.diag_descend.to_string()),
-            ("assume_step", s.set.assume_step.to_string()),
-            ("sprint_water", s.set.sprint_water.to_string()),
-            ("tool_select", s.set.tool_select.to_string()),
-            ("bottom_slab", s.set.bottom_slab.to_string()),
-        ]
+        st::SETTINGS
+            .iter()
+            .map(|sp| (sp.key, s.set.value(sp.key)))
+            .collect()
     })
 }
-
-/// Every persisted setting key — the tick reloads them all so a value
-/// written via `/b set` survives restarts and edits take effect live.
-pub const KEYS: &[&str] = &[
-    "sprint",
-    "allow_break",
-    "allow_place",
-    "allow_parkour",
-    "max_drop",
-    "mine_radius",
-    "mine_scan_drops",
-    "exposed_ores",
-    "follow_radius",
-    "legit_mine",
-    "assume_water",
-    "assume_lava",
-    "mob_avoid_r",
-    "mob_avoid_c",
-    "parkour_place",
-    "downward",
-    "vines",
-    "diag_ascend",
-    "diag_descend",
-    "assume_step",
-    "sprint_water",
-    "tool_select",
-    "bottom_slab",
-];
 
 /// Planner flags every module shares — one site so a new setting can't
 /// drift between drivers.
@@ -463,3 +512,164 @@ pub fn opts(s: &State) -> crate::game::umbx_pathfind::Opts {
         sprint_water: s.set.sprint_water,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers every module used to carry its own copy of.
+// ---------------------------------------------------------------------------
+
+/// The player's feet cell.
+pub fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
+    [
+        p.position.x.floor() as i32,
+        p.position.y.floor() as i32,
+        p.position.z.floor() as i32,
+    ]
+}
+
+/// Chat line with the `baritone:` prefix.
+pub fn say(game: &mut crate::game::Game<'_>, m: &str) {
+    game.native_chat(&format!("baritone: {m}"));
+}
+
+/// Block-centre point of a cell.
+pub fn center(p: [i32; 3]) -> [f64; 3] {
+    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
+}
+
+/// `minecraft:stone` -> `stone`.
+pub fn tail(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+/// `minecraft:stone`/`Stone` -> `stone` — a lowercase bare tail.
+pub fn norm(s: &str) -> String {
+    s.trim_start_matches("minecraft:").to_ascii_lowercase()
+}
+
+/// Full-collision block at `p`.
+pub fn solid(game: &crate::game::Game<'_>, p: [i32; 3]) -> bool {
+    game.res
+        .facts()
+        .get(game.world.block(p[0], p[1], p[2]))
+        .full_collision
+}
+
+/// The cell is one of the three air states.
+pub fn is_air(name: &str) -> bool {
+    name == "minecraft:air" || name.ends_with("_air")
+}
+
+/// `ends_with` match on the name tail (`stone` also hits `sandstone`;
+/// callers that care check exact tails first).
+pub fn name_match(f_name: &str, want: &str) -> bool {
+    tail(f_name).ends_with(want)
+}
+
+/// A `Hit` centred on `face` of `cell`.
+pub fn face_hit(cell: [i32; 3], face: [i32; 3]) -> crate::game::Hit {
+    crate::game::Hit {
+        inside: false,
+        pos: cell,
+        face,
+        point: [
+            cell[0] as f64 + 0.5 + face[0] as f64 * 0.5,
+            cell[1] as f64 + 0.5 + face[1] as f64 * 0.5,
+            cell[2] as f64 + 0.5 + face[2] as f64 * 0.5,
+        ],
+    }
+}
+
+/// Face `at` (a world point) with the camera + body yaw. `pitch` also
+/// aims the head up/down at the point — break/place aiming needs it;
+/// farm's soil clicks keep a flat yaw.
+pub fn aim(game: &mut crate::game::Game<'_>, at: [f64; 3], pitch: bool) {
+    let Some(p) = game.player.as_ref() else { return };
+    let dx = at[0] - p.position.x;
+    let dz = at[2] - p.position.z;
+    let yaw = (-dx.atan2(dz).to_degrees()) as f32;
+    let dy = at[1] - (p.position.y + 1.62);
+    let pv = (-dy.atan2(dx.hypot(dz)).to_degrees()) as f32;
+    game.yaw = yaw;
+    if pitch {
+        game.pitch = pv;
+    }
+    let p = game.player.as_mut().unwrap();
+    p.yaw = yaw;
+    p.head_yaw = yaw;
+    if pitch {
+        p.pitch = pv;
+    }
+}
+
+/// Where the player can path from. Wherever the player's body actually
+/// is — physics truth beats the planner's standability model (fences,
+/// slabs and fresh placements all collide differently than they read).
+/// Picking a "standable" cell the player isn't in made the first move
+/// expect them somewhere else.
+///
+/// Takes the state lock through `pf::W::new` — never call inside `with`.
+pub fn start_cell(game: &crate::game::Game<'_>) -> Option<[i32; 3]> {
+    let w = pf::W::new(game);
+    let player = game.player.as_ref()?;
+    let feet = feet(player);
+    if w.body_open(feet) || w.water(feet) {
+        if player.ground.on_ground || w.floor(feet) || w.water(feet) {
+            return Some(feet);
+        }
+        // Airborne: feet() floors the mid-jump position a block high, so
+        // the plan would start from a cell the player doesn't stand on.
+        // Start from where they'll land instead.
+        for d in 1..=5 {
+            let p = [feet[0], feet[1] - d, feet[2]];
+            if w.floor(p) && w.body_open(p) {
+                return Some(p);
+            }
+        }
+        return Some(feet);
+    }
+    // Buried or otherwise unsound: fall back to the nearest standable cell.
+    for dy in -2..=2 {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let p = [feet[0] + dx, feet[1] + dy, feet[2] + dz];
+                if w.standable(p) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    // In water there is no standable cell: start where we float and let
+    // Swim moves carry the route to shore.
+    if w.water(feet) {
+        return Some(feet);
+    }
+    // Buried with nothing standable nearby (suffocating in stone, wedged
+    // in gravel): start at the feet anyway — Break successors dig the
+    // body out. Returning None here left the process visibly frozen.
+    Some(feet)
+}
+
+/// Stuck-watchdog thresholds every driver shares: re-plan once at
+/// REPLAN_TICKS still ticks, give up at STUCK_TICKS.
+pub const REPLAN_TICKS: u32 = 40;
+pub const STUCK_TICKS: u32 = 120;
+
+/// Neighbour offsets a placement can hang a block's face on: the four
+/// sides and the face below.
+pub const SUPPORT_DIRS: &[[i32; 3]] = &[
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+    [0, -1, 0],
+];
+
+/// All six face-neighbour offsets.
+pub const SIX_DIRS: &[[i32; 3]] = &[
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+    [0, 1, 0],
+    [0, -1, 0],
+];

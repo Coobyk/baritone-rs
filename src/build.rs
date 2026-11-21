@@ -126,24 +126,8 @@ pub fn enqueue(game: &Game<'_>, edits: Vec<Edit>) -> usize {
 }
 
 /// Edits still queued, for status lines.
-pub fn pending() -> usize {
+fn pending() -> usize {
     jobs(|j| j.queue.len())
-}
-
-fn say(game: &mut Game<'_>, m: &str) {
-    game.native_chat(&format!("baritone: {m}"));
-}
-
-fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
-    [
-        p.position.x.floor() as i32,
-        p.position.y.floor() as i32,
-        p.position.z.floor() as i32,
-    ]
-}
-
-fn center(p: [i32; 3]) -> [f64; 3] {
-    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
 }
 
 fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -157,78 +141,6 @@ fn cell_dist2(a: [i32; 3], b: [i32; 3]) -> i64 {
     d[0] as i64 * d[0] as i64 + d[1] as i64 * d[1] as i64 + d[2] as i64 * d[2] as i64
 }
 
-/// Face `at` (a world point) with the camera yaw (same as the executor's).
-fn aim(game: &mut Game<'_>, at: [f64; 3]) {
-    let Some(p) = game.player.as_ref() else { return };
-    let dx = at[0] - p.position.x;
-    let dz = at[2] - p.position.z;
-    let yaw = (-dx.atan2(dz).to_degrees()) as f32;
-    let dy = at[1] - (p.position.y + 1.62);
-    let pitch = (-dy.atan2(dx.hypot(dz)).to_degrees()) as f32;
-    game.yaw = yaw;
-    let p = game.player.as_mut().unwrap();
-    p.yaw = yaw;
-    p.head_yaw = yaw;
-    let _ = pitch;
-}
-
-fn face_hit(cell: [i32; 3], face: [i32; 3]) -> crate::game::Hit {
-    crate::game::Hit {
-        inside: false,
-        pos: cell,
-        face,
-        point: [
-            cell[0] as f64 + 0.5 + face[0] as f64 * 0.5,
-            cell[1] as f64 + 0.5 + face[1] as f64 * 0.5,
-            cell[2] as f64 + 0.5 + face[2] as f64 * 0.5,
-        ],
-    }
-}
-
-fn solid(game: &Game<'_>, p: [i32; 3]) -> bool {
-    game.res
-        .facts()
-        .get(game.world.block(p[0], p[1], p[2]))
-        .full_collision
-}
-
-fn is_air(name: &str) -> bool {
-    name == "minecraft:air" || name.ends_with("_air")
-}
-
-fn tail(name: &str) -> &str {
-    name.rsplit(':').next().unwrap_or(name)
-}
-
-/// `ends_with` match on the name tail (`stone` also hits `sandstone`).
-fn name_match(f_name: &str, want: &str) -> bool {
-    tail(f_name).ends_with(want)
-}
-
-/// Where the player can stand from where they are (same as the core's).
-fn start_cell(game: &Game<'_>) -> Option<[i32; 3]> {
-    let w = pf::W::new(game);
-    let feet = feet(game.player.as_ref()?);
-    if w.standable(feet) {
-        return Some(feet);
-    }
-    for dy in -2..=2 {
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let p = [feet[0] + dx, feet[1] + dy, feet[2] + dz];
-                if w.standable(p) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn opts(s: &rt::State) -> pf::Opts {
-    rt::opts(s)
-}
-
 // ---------------------------------------------------------------------------
 // Module interface
 // ---------------------------------------------------------------------------
@@ -240,16 +152,13 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
     if !matches!(head.to_ascii_lowercase().as_str(), "build" | "schematica" | "schem") {
         return false;
     }
-    if !rt::enabled(game) || !game.native_window() {
-        return true;
-    }
     match head.to_ascii_lowercase().as_str() {
         "build" => {
             build_cmd(game, &args[1..]);
             true
         }
         "schematica" | "schem" => {
-            say(
+            rt::say(
                 game,
                 "schematica: /b build <name> loads schematics/<name>.schematic under the game dir or ~/.local/share/horizon/",
             );
@@ -261,7 +170,7 @@ pub fn command(game: &mut Game<'_>, args: &[&str]) -> bool {
 
 /// Every client tick: reload the persisted pause flag, then drive the queue.
 pub fn tick(game: &mut Game<'_>) {
-    if !rt::enabled(game) || !game.native_window() {
+    if !rt::enabled() || !game.native_window() {
         // A half-placed edit must not keep `use`/`attack` latched when the
         // mod is switched off or the window changes.
         rt::with(|s| s.want = rt::Want::default());
@@ -272,32 +181,6 @@ pub fn tick(game: &mut Game<'_>) {
         jobs(|j| j.paused = v == "true");
     }
     driver(game);
-}
-
-/// Settings-page button: `Build: <status>` toggles pause/resume.
-pub fn settings(game: &Game<'_>, out: &mut Vec<String>) {
-    let _ = game;
-    let (n, paused) = jobs(|j| (j.queue.len(), j.paused));
-    let status = if n == 0 {
-        "idle".to_owned()
-    } else if paused {
-        format!("paused ({n} edits)")
-    } else {
-        format!("{n} edits left")
-    };
-    out.push(format!("Build: {status}"));
-}
-
-pub fn click(game: &mut Game<'_>, button: usize) -> bool {
-    if button != 0 {
-        return false;
-    }
-    let paused = jobs(|j| {
-        j.paused = !j.paused;
-        j.paused
-    });
-    game.set_setting(rt::MOD_ID, "build_paused", &paused.to_string());
-    true
 }
 
 pub fn help() -> &'static [&'static str] {
@@ -334,7 +217,7 @@ fn driver(game: &mut Game<'_>) {
         return;
     }
     let Some(player) = game.player.as_ref() else { return };
-    let me = feet(player);
+    let me = rt::feet(player);
     let eye = [player.position.x, player.position.y + 1.62, player.position.z];
 
     // Drop satisfied edits and pick the nearest pending one.
@@ -349,7 +232,7 @@ fn driver(game: &mut Game<'_>) {
         }
         let mut best: Option<(f64, usize)> = None;
         for (i, e) in j.queue.iter().enumerate() {
-            let d = dist2(eye, center(edit_pos(e)));
+            let d = dist2(eye, rt::center(edit_pos(e)));
             if best.map_or(true, |(b, _)| d < b) {
                 best = Some((d, i));
             }
@@ -375,7 +258,7 @@ fn driver(game: &mut Game<'_>) {
             });
             ex::apply(game, &rt::Want::default());
             let skipped = jobs(|j| j.skipped);
-            say(game, &format!("build done ({skipped} edits skipped)"));
+            rt::say(game, &format!("build done ({skipped} edits skipped)"));
         }
         return;
     };
@@ -395,7 +278,7 @@ fn driver(game: &mut Game<'_>) {
     });
     jobs(|j| j.drove = true);
 
-    if dist2(eye, center(pos)) <= REACH * REACH {
+    if dist2(eye, rt::center(pos)) <= REACH * REACH {
         execute(game, i, pos, eye);
         return;
     }
@@ -412,11 +295,11 @@ fn satisfied(game: &Game<'_>, e: &Edit) -> bool {
         .get(game.world.block(p[0], p[1], p[2]));
     match e {
         Edit::Break(_) => {
-            is_air(f.name.as_ref())
+            rt::is_air(f.name.as_ref())
                 || f.fluid != horizon_items::blocks::Fluid::None
                 || f.hardness < 0.0
         }
-        Edit::Place(_, name) => name_match(f.name.as_ref(), name),
+        Edit::Place(_, name) => rt::name_match(f.name.as_ref(), name),
     }
 }
 
@@ -453,7 +336,7 @@ fn execute(game: &mut Game<'_>, i: usize, pos: [i32; 3], eye: [f64; 3]) {
             .get(game.world.block(pos[0], pos[1], pos[2]));
         (
             f.full_collision && !f.replaceable,
-            name_match(f.name.as_ref(), &name),
+            rt::name_match(f.name.as_ref(), &name),
         )
     };
     if occupied && !matching {
@@ -467,7 +350,7 @@ fn execute(game: &mut Game<'_>, i: usize, pos: [i32; 3], eye: [f64; 3]) {
             < 0.0;
         if unbreakable {
             drop_edit(i);
-            say(game, "unbreakable block in the way — edit dropped");
+            rt::say(game, "unbreakable block in the way — edit dropped");
             return;
         }
         // Wrong block in the cell: mine it out, place next tick.
@@ -488,26 +371,26 @@ fn execute(game: &mut Game<'_>, i: usize, pos: [i32; 3], eye: [f64; 3]) {
             && pz - 0.3 < z0 + 1.0
         {
             drop_edit(i);
-            say(game, "target cell intersects the player — edit dropped");
+            rt::say(game, "target cell intersects the player — edit dropped");
             return;
         }
     }
     let Some(sup) = support(game, eye, pos) else {
         drop_edit(i);
-        say(game, "no support block to place on — edit dropped");
+        rt::say(game, "no support block to place on — edit dropped");
         return;
     };
     if !select_block(game, &name) && !jobs(|j| j.approx_warned) {
         jobs(|j| j.approx_warned = true);
-        say(
+        rt::say(
             game,
             &format!("no '{name}' in the hotbar — placing with an approximate block"),
         );
     }
     let face = [pos[0] - sup[0], pos[1] - sup[1], pos[2] - sup[2]];
-    aim(game, center(pos));
+    rt::aim(game, rt::center(pos), true);
     let w = rt::Want {
-        hit: Some(face_hit(sup, face)),
+        hit: Some(rt::face_hit(sup, face)),
         right: true,
         ..rt::Want::default()
     };
@@ -517,9 +400,9 @@ fn execute(game: &mut Game<'_>, i: usize, pos: [i32; 3], eye: [f64; 3]) {
 
 /// Hold attack on `pos`'s top face until it clears.
 fn attack(game: &mut Game<'_>, pos: [i32; 3]) {
-    aim(game, center(pos));
+    rt::aim(game, rt::center(pos), true);
     let w = rt::Want {
-        hit: Some(face_hit(pos, [0, 1, 0])),
+        hit: Some(rt::face_hit(pos, [0, 1, 0])),
         attack: true,
         ..rt::Want::default()
     };
@@ -538,7 +421,7 @@ fn support(game: &Game<'_>, eye: [f64; 3], pos: [i32; 3]) -> Option<[i32; 3]> {
         [0, 0, -1],
         [0, 1, 0],
     ];
-    let c = center(pos);
+    let c = rt::center(pos);
     // A support on the far side of the player shows the player the face
     // `pos - support`; rank by d dot (cell - eye).
     dirs.sort_by(|a, b| {
@@ -551,7 +434,7 @@ fn support(game: &Game<'_>, eye: [f64; 3], pos: [i32; 3]) -> Option<[i32; 3]> {
     });
     dirs.iter()
         .map(|d| [pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]])
-        .find(|&n| solid(game, n))
+        .find(|&n| rt::solid(game, n))
 }
 
 /// Select the hotbar stack whose block's `StateFacts::item` maps to a state
@@ -571,7 +454,7 @@ fn select_block(game: &mut Game<'_>, name: &str) -> bool {
             .facts()
             .states
             .iter()
-            .any(|f| f.item.as_ref() == stack.item.as_ref() && tail(f.name.as_ref()) == name);
+            .any(|f| f.item.as_ref() == stack.item.as_ref() && rt::tail(f.name.as_ref()) == name);
         if exact {
             game.selected = slot;
             return true;
@@ -589,7 +472,7 @@ fn select_block(game: &mut Game<'_>, name: &str) -> bool {
             .facts()
             .states
             .iter()
-            .any(|f| f.item.as_ref() == stack.item.as_ref() && name_match(f.name.as_ref(), name));
+            .any(|f| f.item.as_ref() == stack.item.as_ref() && rt::name_match(f.name.as_ref(), name));
         if matched {
             game.selected = slot;
             return true;
@@ -631,10 +514,10 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
         });
     }
     if jobs(|j| j.at >= j.path.len()) {
-        let o = rt::with(|s| opts(s));
+        let o = rt::with(|s| rt::opts(s));
         let found = {
             let w = pf::W::new(game);
-            start_cell(game).and_then(|start| {
+            rt::start_cell(game).and_then(|start| {
                 pf::find(&w, start, goal, &o, |p, _| {
                     w.standable(p) && cell_dist2(p, goal) <= NEAR
                 })
@@ -665,7 +548,7 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
                     });
                     if drop_it {
                         drop_edit(i);
-                        say(game, "can't reach an edit — dropped it");
+                        rt::say(game, "can't reach an edit — dropped it");
                         return;
                     }
                     if let Some(eye) = game.player.as_ref().map(|p| {
@@ -683,7 +566,7 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
                 });
                 if drop_it {
                     drop_edit(i);
-                    say(game, "can't reach an edit — dropped it");
+                    rt::say(game, "can't reach an edit — dropped it");
                 }
                 let want = rt::with(|s| s.want);
                 ex::apply(game, &want);
@@ -710,7 +593,7 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
             }
             ex::Out::Failed => {
                 drop_edit(i);
-                say(game, "can't do that move — edit dropped");
+                rt::say(game, "can't do that move — edit dropped");
             }
             ex::Out::Working => {}
         }
@@ -727,14 +610,14 @@ fn drive_to(game: &mut Game<'_>, i: usize, goal: [i32; 3], me: [i32; 3]) {
         }
         j.stuck
     });
-    if stuck == 40 && !jobs(|j| j.replanned) {
+    if stuck == rt::REPLAN_TICKS && !jobs(|j| j.replanned) {
         jobs(|j| {
             j.replanned = true;
             j.path.clear();
         });
-    } else if stuck >= 120 {
+    } else if stuck >= rt::STUCK_TICKS {
         drop_edit(i);
-        say(game, "stuck — edit dropped");
+        rt::say(game, "stuck — edit dropped");
     }
 
     let want = rt::with(|s| s.want);
@@ -749,12 +632,12 @@ fn build_cmd(game: &mut Game<'_>, args: &[&str]) {
     let Some(name) = args.first() else {
         let n = pending();
         if n == 0 {
-            say(game, "/b build <name> [x y z] — files in schematics/ next to the game or ~/.local/share/horizon/schematics/");
+            rt::say(game, "/b build <name> [x y z] — files in schematics/ next to the game or ~/.local/share/horizon/schematics/");
             return;
         }
         jobs(|j| j.paused = false);
         game.set_setting(rt::MOD_ID, "build_paused", "false");
-        say(game, &format!("build resumed ({n} edits)"));
+        rt::say(game, &format!("build resumed ({n} edits)"));
         return;
     };
     // `build <name> x y z`: the schematic's (0,0,0) lands at that absolute
@@ -763,19 +646,19 @@ fn build_cmd(game: &mut Game<'_>, args: &[&str]) {
         Some([x, y, z]) => match (x.parse(), y.parse(), z.parse()) {
             (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
             _ => {
-                say(game, "origin must be three integers: /b build <name> x y z");
+                rt::say(game, "origin must be three integers: /b build <name> x y z");
                 return;
             }
         },
         None => None,
         _ => {
-            say(game, "origin must be three integers: /b build <name> x y z");
+            rt::say(game, "origin must be three integers: /b build <name> x y z");
             return;
         }
     };
     match load_schematic(game, name, origin) {
-        Ok(msg) => say(game, &msg),
-        Err(e) => say(game, &e),
+        Ok(msg) => rt::say(game, &msg),
+        Err(e) => rt::say(game, &e),
     }
 }
 
@@ -861,7 +744,7 @@ fn load_schematic(
     }
     let data = tag_bytes(get("Data")).unwrap_or(&[]);
     let add = tag_bytes(get("AddBlocks")).or_else(|| tag_bytes(get("Add")));
-    let Some(me) = origin.or_else(|| game.player.as_ref().map(feet)) else {
+    let Some(me) = origin.or_else(|| game.player.as_ref().map(rt::feet)) else {
         return Err("no player".to_owned());
     };
     // `buildIgnoreBlocks`: schematic cells resolving to these names are
@@ -888,7 +771,7 @@ fn load_schematic(
         .facts()
         .states
         .iter()
-        .map(|f| tail(f.name.as_ref()))
+        .map(|f| rt::tail(f.name.as_ref()))
         .collect();
     let mut cache: HashMap<(i32, u8), Option<&'static str>> = HashMap::new();
 
@@ -923,7 +806,7 @@ fn load_schematic(
                     .res
                     .facts()
                     .get(game.world.block(at[0], at[1], at[2]));
-                if !is_air(f.name.as_ref())
+                if !rt::is_air(f.name.as_ref())
                     && f.hardness >= 0.0
                     && f.fluid == horizon_items::blocks::Fluid::None
                 {
@@ -939,12 +822,12 @@ fn load_schematic(
                 Some(n) => {
                     let mut want = n;
                     for (f, t) in &subs {
-                        if name_match(n, f) && known.contains(t.as_str()) {
+                        if rt::name_match(n, f) && known.contains(t.as_str()) {
                             want = t;
                             break;
                         }
                     }
-                    if ignores.iter().any(|i| name_match(want, i)) {
+                    if ignores.iter().any(|i| rt::name_match(want, i)) {
                         ignored += 1;
                     } else {
                         edits.push(Edit::Place(at, want.to_string()));

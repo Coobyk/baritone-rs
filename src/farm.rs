@@ -32,9 +32,6 @@ const REACH2: f64 = REACH * REACH;
 const Y_BAND: i32 = 8;
 /// Ticks spent acting on one job before it is given up on.
 const ACT_TIMEOUT: u32 = 60;
-/// Ticks without movement before re-planning / dropping a job.
-const REPLAN_TICKS: u32 = 40;
-const STUCK_TICKS: u32 = 120;
 /// A radius-96 scan walks ~160k cells — hold off at least this long after
 /// one so a drained queue in leaf-litter terrain doesn't rescan per tick.
 const SCAN_CD: u32 = 30;
@@ -136,51 +133,6 @@ fn with<R>(f: impl FnOnce(&mut Farm) -> R) -> R {
     f(g.as_mut().unwrap())
 }
 
-fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
-    [
-        p.position.x.floor() as i32,
-        p.position.y.floor() as i32,
-        p.position.z.floor() as i32,
-    ]
-}
-
-fn on(game: &crate::game::Game<'_>) -> bool {
-    rt::enabled(game)
-}
-
-/// The window's own game, not the single player server's.
-fn client(game: &crate::game::Game<'_>) -> bool {
-    game.native_window()
-}
-
-fn say(game: &mut crate::game::Game<'_>, m: &str) {
-    game.native_chat(&format!("baritone: {m}"));
-}
-
-fn opts(s: &rt::State) -> pf::Opts {
-    rt::opts(s)
-}
-
-/// Where the player can path from: their cell, else the nearest standable.
-fn start_cell(game: &crate::game::Game<'_>) -> Option<[i32; 3]> {
-    let w = pf::W::new(game);
-    let feet = feet(game.player.as_ref()?);
-    if w.standable(feet) {
-        return Some(feet);
-    }
-    for dy in -2..=2 {
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let p = [feet[0] + dx, feet[1] + dy, feet[2] + dz];
-                if w.standable(p) {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Squared distance between two cell centres.
 fn cell_dist2(a: [i32; 3], b: [i32; 3]) -> f64 {
     let dx = (a[0] - b[0]) as f64;
@@ -189,30 +141,10 @@ fn cell_dist2(a: [i32; 3], b: [i32; 3]) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
-/// Right-click/attack hit on a cell's top face, centred on that face.
+/// Right-click/attack hit on a cell's top face — `rt::face_hit` centred
+/// on [0,1,0].
 fn hit_top(cell: [i32; 3]) -> crate::game::Hit {
-    crate::game::Hit {
-        inside: false,
-        pos: cell,
-        face: [0, 1, 0],
-        point: [
-            cell[0] as f64 + 0.5,
-            cell[1] as f64 + 1.0,
-            cell[2] as f64 + 0.5,
-        ],
-    }
-}
-
-/// Face `at` (a world point) with the camera yaw.
-fn aim(game: &mut crate::game::Game<'_>, at: [f64; 3]) {
-    let Some(p) = game.player.as_ref() else { return };
-    let dx = at[0] - p.position.x;
-    let dz = at[2] - p.position.z;
-    let yaw = (-dx.atan2(dz).to_degrees()) as f32;
-    game.yaw = yaw;
-    let p = game.player.as_mut().unwrap();
-    p.yaw = yaw;
-    p.head_yaw = yaw;
+    rt::face_hit(cell, [0, 1, 0])
 }
 
 fn block_name<'a>(game: &'a crate::game::Game<'_>, p: [i32; 3]) -> &'a str {
@@ -285,7 +217,7 @@ fn valid(game: &crate::game::Game<'_>, job: Job) -> bool {
 /// Close enough to act: the player's feet cell is within reach of the job
 /// cell, matching the path's done predicate.
 fn near(game: &crate::game::Game<'_>, job: Job) -> bool {
-    let Some(me) = game.player.as_ref().map(feet) else {
+    let Some(me) = game.player.as_ref().map(rt::feet) else {
         return false;
     };
     cell_dist2(me, job.cell) <= REACH2
@@ -297,7 +229,7 @@ fn near(game: &crate::game::Game<'_>, job: Job) -> bool {
 /// the number of jobs found.
 fn scan(game: &crate::game::Game<'_>) -> usize {
     let Some(player) = game.player.as_ref() else { return 0 };
-    let me = feet(player);
+    let me = rt::feet(player);
     let (radius, skip) = with(|s| (s.radius, s.skip.clone()));
     let seeds = seed_slot(game).is_some();
     let hoe = hoe_slot(game).is_some();
@@ -397,7 +329,7 @@ fn advance(game: &mut crate::game::Game<'_>) {
                 }
                 with(|s| s.scan_cd = SCAN_CD);
                 if scan(game) == 0 {
-                    say(game, "farm done");
+                    rt::say(game, "farm done");
                     stop(game);
                     return;
                 }
@@ -454,7 +386,8 @@ fn work(game: &mut crate::game::Game<'_>, job: Job) {
         }
     }
     if let Some(h) = want.hit {
-        aim(game, h.point);
+        // Soil clicks keep a flat yaw — the forced hit aims the click.
+        rt::aim(game, h.point, false);
     }
     rt::with(|s| s.want = want);
 }
@@ -462,7 +395,7 @@ fn work(game: &mut crate::game::Game<'_>, job: Job) {
 /// One farming tick: keep a current job, path within reach of it, act.
 fn step(game: &mut crate::game::Game<'_>) {
     let Some(player) = game.player.as_ref() else { return };
-    let me = feet(player);
+    let me = rt::feet(player);
 
     if with(|s| s.job.is_none()) {
         advance(game);
@@ -491,8 +424,8 @@ fn step(game: &mut crate::game::Game<'_>) {
     // Path to any standable cell whose centre is within reach of the job.
     if with(|s| s.at >= s.path.len()) {
         let w = pf::W::new(game);
-        let Some(start) = start_cell(game) else { return };
-        let o = rt::with(|s| opts(s));
+        let Some(start) = rt::start_cell(game) else { return };
+        let o = rt::with(|s| rt::opts(s));
         let target = job.cell;
         let path = pf::find(&w, start, target, &o, |p, _| {
             w.standable(p) && cell_dist2(p, target) <= REACH2
@@ -555,12 +488,12 @@ fn step(game: &mut crate::game::Game<'_>) {
         }
         s.stuck
     });
-    if stuck == REPLAN_TICKS {
+    if stuck == rt::REPLAN_TICKS {
         with(|s| {
             s.path.clear();
             s.at = 0;
         });
-    } else if stuck >= STUCK_TICKS {
+    } else if stuck >= rt::STUCK_TICKS {
         with(|s| {
             s.skip.insert(job);
             s.job = None;
@@ -587,10 +520,10 @@ fn start(game: &mut crate::game::Game<'_>, radius: i32) {
     if n == 0 {
         with(|s| s.running = false);
         rt::with(|s| s.busy = false);
-        say(game, "nothing to farm in range — check seeds/hoe");
+        rt::say(game, "nothing to farm in range — check seeds/hoe");
         return;
     }
-    say(game, &format!("farming {n} jobs within {radius} blocks"));
+    rt::say(game, &format!("farming {n} jobs within {radius} blocks"));
 }
 
 /// Give up the shared input slot without needing a `Game` (used by other
@@ -612,21 +545,18 @@ fn stop(game: &mut crate::game::Game<'_>) {
 
 /// `/b farm [radius]` / `/b farm off`.
 pub fn command(game: &mut crate::game::Game<'_>, args: &[&str]) -> bool {
-    if !on(game) || !client(game) {
-        return false;
-    }
-    if args.first().copied() != Some("farm") {
+    if !matches!(args.first().map(|s| s.to_ascii_lowercase()).as_deref(), Some("farm")) {
         return false;
     }
     match args.get(1).copied() {
         None => start(game, DEFAULT_RADIUS),
         Some("off" | "stop") => {
             stop(game);
-            say(game, "farm stopped");
+            rt::say(game, "farm stopped");
         }
         Some(v) => match v.parse::<i32>() {
             Ok(r) => start(game, r),
-            Err(_) => say(game, "/b farm [radius] — radius in blocks, 8..96"),
+            Err(_) => rt::say(game, "/b farm [radius] — radius in blocks, 8..96"),
         },
     }
     true
@@ -637,7 +567,7 @@ pub fn tick(game: &mut crate::game::Game<'_>) {
     if !with(|s| s.running) {
         return;
     }
-    if !on(game) || !client(game) {
+    if !rt::enabled() || !game.native_window() {
         // Mod off or another window: drop inputs so nothing lingers.
         rt::with(|s| s.want = rt::Want::default());
         ex::apply(game, &rt::Want::default());
@@ -661,26 +591,6 @@ pub fn tick(game: &mut crate::game::Game<'_>) {
     step(game);
     let want = rt::with(|s| s.want);
     ex::apply(game, &want);
-}
-
-/// Settings page label: a single Farm toggle.
-pub fn settings(game: &crate::game::Game<'_>, out: &mut Vec<String>) {
-    let running = with(|s| s.running);
-    out.push(format!("Farm: {}", if running { "on" } else { "off" }));
-    let _ = game;
-}
-
-/// Our section's one button toggles the process.
-pub fn click(game: &mut crate::game::Game<'_>, button: usize) -> bool {
-    if button != 0 {
-        return false;
-    }
-    if with(|s| s.running) {
-        stop(game);
-    } else {
-        start(game, DEFAULT_RADIUS);
-    }
-    true
 }
 
 /// `/b help` contribution.

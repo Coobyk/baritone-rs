@@ -10,6 +10,8 @@ use std::time::Instant;
 
 use horizon_client::fast_hash::FxHashMap;
 
+use crate::game::umbx_baritone as rt;
+
 pub const MAX_NODES: usize = 120_000;
 /// Wall-clock budget for one plan. The search runs on the game thread, so
 /// an unlucky long path used to stall frames for seconds; past this the
@@ -27,8 +29,8 @@ pub enum Kind {
     /// Ride a ladder/vine column `n` cells (signed).
     Ladder { n: i8 },
     Swim,
-    /// Break `count` cells listed in `cells` before walking in.
-    Break { count: u8 },
+    /// Break the cells listed in `cells` before walking in.
+    Break,
     /// Rise straight up one cell, placing a block under feet.
     Pillar,
     /// Cross to a floor-less cell, placing the floor first.
@@ -150,7 +152,7 @@ impl W<'_> {
     /// The block at `p` can hold weight: full collision, or a slab/stairs
     /// while `allowWalkOnBottomSlab` is on (all halves accepted — slightly
     /// generous for top slabs).
-    fn block_solid(&self, p: [i32; 3]) -> bool {
+    pub fn block_solid(&self, p: [i32; 3]) -> bool {
         let f = self.fat(p);
         if f.full_collision {
             return true;
@@ -507,7 +509,7 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 for g in 1..=gap {
                     clear = clear && w.body_open([p[0] + dx * g, p[1], p[2] + dz * g]);
                 }
-                let sup = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]
+                let sup = rt::SUPPORT_DIRS
                     .iter()
                     .any(|o2| w.block_solid([fl[0] + o2[0], fl[1] + o2[1], fl[2] + o2[2]]));
                 if clear && sup {
@@ -525,7 +527,7 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
             && w.body_open(n)
             && !w.floor(n)
             && !w.climbable(p)
-            && self_has_bridge_support(w, p, n)
+            && w.floor(p)
         {
             out.push(Move {
                 pos: n,
@@ -588,21 +590,13 @@ fn succ(w: &W, p: [i32; 3], o: &Opts, out: &mut Vec<Move>) {
                 if w.floor(n) || w.breakable([n[0], n[1] - 1, n[2]]) {
                     out.push(Move {
                         pos: n,
-                        kind: Kind::Break {
-                            count: cells.len() as u8,
-                        },
+                        kind: Kind::Break,
                         cells,
                     });
                 }
             }
         }
     }
-}
-
-/// Can the floor under `n` be placed from `p`? A side face of `p`'s floor
-/// must be sturdy (the block we stand on), facing `n`.
-fn self_has_bridge_support(w: &W, p: [i32; 3], _n: [i32; 3]) -> bool {
-    w.floor(p)
 }
 
 /// A* from `start` to `goal`. `done` lets goals accept more than one cell
@@ -734,7 +728,7 @@ pub fn find_partial(
                         base
                     }
                 }
-                Kind::Break { .. } => 1.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
+                Kind::Break => 1.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Downward => 2.0 + m.cells.iter().map(|c| w.break_cost(*c)).sum::<f64>(),
                 Kind::Pillar => 3.5,
                 Kind::Bridge => 3.0,

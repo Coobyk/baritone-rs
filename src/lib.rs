@@ -10,36 +10,11 @@ use mod_api::{
     CommandSuggestion, Hooks, Registrar, RegistrationContext, SettingSpec,
 };
 
-// The completion-name tables also injected into the game as
-// `umbx_baritone_names` (single source for both sides).
+// The completion-name tables and the settings table are also injected
+// into the game as `umbx_baritone_names`/`umbx_baritone_settings`
+// (single source for both sides).
 include!("names.rs");
-
-/// Setting keys the game-side runtime persists (`rt::KEYS` mirrors them).
-const SETTING_NAMES: &[&str] = &[
-    "sprint",
-    "allow_break",
-    "allow_place",
-    "allow_parkour",
-    "max_drop",
-    "mine_radius",
-    "mine_scan_drops",
-    "exposed_ores",
-    "follow_radius",
-    "legit_mine",
-    "assume_water",
-    "assume_lava",
-    "mob_avoid_r",
-    "mob_avoid_c",
-    "parkour_place",
-    "downward",
-    "vines",
-    "diag_ascend",
-    "diag_descend",
-    "assume_step",
-    "sprint_water",
-    "tool_select",
-    "bottom_slab",
-];
+include!("settings_table.rs");
 
 /// Waypoint names for `wp goto`/`wp delete` completion, refreshed from the
 /// persisted `wp_names` setting on the client tick.
@@ -122,6 +97,82 @@ impl CommandArgumentType for Waypoint {
     }
 }
 
+/// `baritone:setting`: every name `/b set` accepts — keys, display names
+/// and aliases from the shared `SETTINGS` table, so completion can never
+/// drift from the game-side parser.
+struct SettingArg;
+impl CommandArgumentType for SettingArg {
+    fn kind(&self) -> CommandArgumentKind {
+        CommandArgumentKind::Word
+    }
+    fn parse(&self, input: &str) -> Result<String, mod_api::CommandArgumentError> {
+        Ok(input.to_ascii_lowercase())
+    }
+    fn suggest(
+        &self,
+        _sender: Option<&CommandSender>,
+        prefix: &str,
+    ) -> Vec<CommandSuggestion> {
+        let p = prefix.to_ascii_lowercase();
+        let mut out: Vec<&'static str> = Vec::new();
+        for s in SETTINGS {
+            for c in [s.key, s.display]
+                .into_iter()
+                .chain(s.aliases.iter().copied())
+            {
+                if c.to_ascii_lowercase().starts_with(&p) && !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+        out.into_iter().map(CommandSuggestion::new).collect()
+    }
+}
+
+/// `baritone:schematic`: `.schematic` files under `schematics/` in the
+/// dirs the game-side loader reads (cwd, `$HORIZON_HOME`,
+/// `~/.local/share/horizon`).
+struct Schematic;
+impl CommandArgumentType for Schematic {
+    fn kind(&self) -> CommandArgumentKind {
+        CommandArgumentKind::Word
+    }
+    fn parse(&self, input: &str) -> Result<String, mod_api::CommandArgumentError> {
+        Ok(input.to_owned())
+    }
+    fn suggest(
+        &self,
+        _sender: Option<&CommandSender>,
+        prefix: &str,
+    ) -> Vec<CommandSuggestion> {
+        let p = prefix.to_ascii_lowercase();
+        let roots = [
+            std::env::current_dir().ok(),
+            std::env::var_os("HORIZON_HOME").map(std::path::PathBuf::from),
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local/share/horizon")),
+        ];
+        let mut out: Vec<String> = Vec::new();
+        for root in roots.into_iter().flatten() {
+            let Ok(dir) = std::fs::read_dir(root.join("schematics")) else {
+                continue;
+            };
+            for e in dir.flatten() {
+                let Some(name) = e.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(base) = name.strip_suffix(".schematic") {
+                    if base.to_ascii_lowercase().starts_with(&p) && !out.iter().any(|o| o == base) {
+                        out.push(base.to_owned());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.into_iter().map(CommandSuggestion::new).collect()
+    }
+}
+
 #[derive(Default)]
 struct Mod;
 #[mod_api::horizon_mod]
@@ -140,7 +191,8 @@ impl Hooks for Mod {
         reg.register_command_argument("blocks", Blocks);
         reg.register_command_argument("waypoint", Waypoint);
         reg.register_command_argument("entity", word_arg(ENTITY_NAMES));
-        reg.register_command_argument("setting", word_arg(SETTING_NAMES));
+        reg.register_command_argument("setting", SettingArg);
+        reg.register_command_argument("schematic", Schematic);
         reg.register_command_argument(
             "click_button",
             ChoiceArgument::new(["left", "right"]),
@@ -153,41 +205,31 @@ impl Hooks for Mod {
             "explore_action",
             ChoiceArgument::new(["save", "clear", "count"]),
         );
-        reg.register_command_argument(
-            "dir",
-            ChoiceArgument::new(["n", "s", "e", "w", "u", "d", "north", "south", "east", "west", "up", "down"]),
-        );
+        reg.register_command_argument("dir", word_arg(SEL_DIRS));
         reg.register_command_argument(
             "render_target",
             ChoiceArgument::new(["path", "goal", "waypoints"]),
         );
 
-        // The buttons of the old settings page, as specs — the runtime
-        // re-reads the files every tick, so toggling applies live.
+        // One spec per row of the shared table — the runtime re-reads
+        // the persisted values every tick, so toggling applies live.
+        // The render_* toggles live in the render module, not rt::Settings.
+        for s in SETTINGS {
+            let spec = if s.toggle {
+                SettingSpec::toggle(s.key, s.label, s.default == "true")
+            } else {
+                SettingSpec::range(
+                    s.key,
+                    s.label,
+                    s.min,
+                    s.max,
+                    s.step,
+                    s.default.parse().unwrap_or(0.0),
+                )
+            };
+            let _ = reg.register_setting(spec);
+        }
         for spec in [
-            SettingSpec::toggle("sprint", "baritone.setting.sprint", true),
-            SettingSpec::toggle("allow_break", "baritone.setting.allow_break", true),
-            SettingSpec::toggle("allow_place", "baritone.setting.allow_place", true),
-            SettingSpec::toggle("allow_parkour", "baritone.setting.allow_parkour", true),
-            SettingSpec::range("max_drop", "baritone.setting.max_drop", 2.0, 8.0, 1.0, 4.0),
-            SettingSpec::range("mine_radius", "baritone.setting.mine_radius", 8.0, 96.0, 8.0, 32.0),
-            SettingSpec::toggle("mine_scan_drops", "baritone.setting.mine_scan_drops", true),
-            SettingSpec::toggle("exposed_ores", "baritone.setting.exposed_ores", false),
-            SettingSpec::range("follow_radius", "baritone.setting.follow_radius", 0.0, 32.0, 1.0, 3.0),
-            SettingSpec::toggle("legit_mine", "baritone.setting.legit_mine", false),
-            SettingSpec::toggle("assume_water", "baritone.setting.assume_water", false),
-            SettingSpec::toggle("assume_lava", "baritone.setting.assume_lava", false),
-            SettingSpec::range("mob_avoid_r", "baritone.setting.mob_avoid_r", 0.0, 32.0, 1.0, 0.0),
-            SettingSpec::range("mob_avoid_c", "baritone.setting.mob_avoid_c", 0.0, 100.0, 0.5, 1.5),
-            SettingSpec::toggle("parkour_place", "baritone.setting.parkour_place", false),
-            SettingSpec::toggle("downward", "baritone.setting.downward", true),
-            SettingSpec::toggle("vines", "baritone.setting.vines", true),
-            SettingSpec::toggle("diag_ascend", "baritone.setting.diag_ascend", false),
-            SettingSpec::toggle("diag_descend", "baritone.setting.diag_descend", false),
-            SettingSpec::toggle("assume_step", "baritone.setting.assume_step", false),
-            SettingSpec::toggle("sprint_water", "baritone.setting.sprint_water", true),
-            SettingSpec::toggle("tool_select", "baritone.setting.tool_select", true),
-            SettingSpec::toggle("bottom_slab", "baritone.setting.bottom_slab", true),
             SettingSpec::toggle("render_path", "baritone.setting.render_path", true),
             SettingSpec::toggle("render_goal", "baritone.setting.render_goal", true),
             SettingSpec::toggle("render_waypoints", "baritone.setting.render_waypoints", true),

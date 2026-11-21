@@ -27,7 +27,7 @@ files after `/b build`, directions after `/b sel expand`, entity types after
 | `/b axis` | Walk to the nearest coordinate axis |
 | `/b spawn` `/b click [left\|right]` | Path to world spawn / pulse a click |
 | `/b pause` `/b resume` `/b stop` `/b path` | Control the active task |
-| `/b set <key> [v]` | `sprint`, `break`, `place`, `parkour`, `parkourPlace`, `drop` (aliases `maxFallHeight`/`maxFallHeightNoWater`), `radius`, `drops`, `exposed`, `followRadius`, `legit`, `water`, `lava`, `mobR`, `mobC`, `allowDownward`, `allowVines`, `allowDiagonalAscend`/`allowDiagonalDescend`, `assumeStep`, `sprintInWater`, `toolSelect`, `allowWalkOnBottomSlab` |
+| `/b set <key> [v]` | `sprint`, `allowBreak`, `allowPlace`, `allowParkour`, `allowParkourPlace`, `maxDrop` (aliases `maxFallHeight`/`maxFallHeightNoWater`/`fallHeight`/`drop`), `mineRadius` (`radius`), `mineScanDroppedItems` (`drops`), `onlyExposedOres` (`exposed`), `followRadius` (`followR`), `legitMine` (`legit`), `assumeWalkOnWater` (`water`), `assumeWalkOnLava` (`lava`), `mobAvoidanceRadius` (`mobR`), `mobAvoidanceCoefficient` (`mobC`), `allowDownward` (`down`), `allowVines`, `allowDiagonalAscend`/`allowDiagonalDescend` (`dAsc`/`dDesc`), `assumeStep` (`step`), `sprintInWater` (`sprintW`/`sprintWater`), `toolSelect` (`tool`/`autoTool`), `allowWalkOnBottomSlab` (`slab`/`bottomSlab`) |
 | `/b goal <x> <z>` `/b invert` | Stored goal; `invert` + `path` runs away from it |
 | `/b blacklist <block\|clear>` | Blocks the pathfinder won't break and mine skips |
 | `/b avoid <block\|clear>` | Blocks the pathfinder still uses but charges +8 (upstream `blocksToAvoid`) |
@@ -87,6 +87,22 @@ changes the planner, same as upstream's.
 
 ## Layout
 
-`mixins/baritone/` — `pathfind.rs` (A* + movement actions), `exec.rs`
-(move executor), `runtime.rs` (state/processes/settings), `glue.rs`
-(commands, driver, settings page), `hooks/` (injection helpers).
+The crate root `src/lib.rs` is the mod `.so`: it registers the
+`baritone:*` command argument types and the options-page settings, both
+derived from shared tables. Everything under `src/` is injected into the
+game as sibling `crate::game::umbx_baritone_*` modules (see
+`[[native.module]]` in `horizon-mod.toml`):
+
+- `runtime.rs` (`umbx_baritone`) — shared state, processes, settings and
+  the helpers every module uses.
+- `pathfind.rs` (`umbx_pathfind`) — A* + movement actions.
+- `exec.rs` (`umbx_baritone_exec`) — move executor (inputs/break/place).
+- `glue.rs` — commands, the per-tick driver, tab completion.
+- `extras.rs` — waypoints, goal, `/b set`, blacklist/avoid, misc commands.
+- `sel.rs` / `build.rs` / `farm.rs` / `render.rs` / `elytra.rs` — feature
+  modules (selections + build queue, farming, overlays, elytra).
+- `names.rs` (`umbx_baritone_names`) and `settings_table.rs`
+  (`umbx_baritone_settings`) — import-free shared tables `include!`d into
+  `lib.rs` as well, so the mod crate and the injected modules read one
+  source.
+- `src/mixins/` — injection helper fragments.

@@ -41,7 +41,9 @@ pub const ENTITY_NAMES: &[&str] = &[
     "iron_golem", "wolf", "axolotl", "item",
 ];
 
-/// `sel` directions (`expand`/`shift` take these).
+/// `sel` directions (`expand`/`shift` take these — the axis spellings
+/// too, matching `sel::dir`).
 pub const SEL_DIRS: &[&str] = &[
     "up", "down", "north", "south", "east", "west", "u", "d", "n", "s", "e", "w",
+    "+x", "-x", "+y", "-y", "+z", "-z",
 ];

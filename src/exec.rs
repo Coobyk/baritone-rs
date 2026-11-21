@@ -14,34 +14,6 @@ pub enum Out {
     Failed,
 }
 
-fn feet(p: &crate::motion::PlayerMotion) -> [i32; 3] {
-    [
-        p.position.x.floor() as i32,
-        p.position.y.floor() as i32,
-        p.position.z.floor() as i32,
-    ]
-}
-
-/// Face `at` (a world point) with the camera yaw.
-fn aim(game: &mut crate::game::Game<'_>, at: [f64; 3]) {
-    let Some(p) = game.player.as_ref() else { return };
-    let dx = at[0] - p.position.x;
-    let dz = at[2] - p.position.z;
-    let yaw = (-dx.atan2(dz).to_degrees()) as f32;
-    let dy = at[1] - (p.position.y + 1.62);
-    let pitch = (-dy.atan2(dx.hypot(dz)).to_degrees()) as f32;
-    game.yaw = yaw;
-    game.pitch = pitch;
-    let p = game.player.as_mut().unwrap();
-    p.yaw = yaw;
-    p.head_yaw = yaw;
-    p.pitch = pitch;
-}
-
-fn center(p: [i32; 3]) -> [f64; 3] {
-    [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5]
-}
-
 /// The face of `b` most visible from the player's eye — dominant axis from
 /// the block centre toward the eye.
 fn face_toward(game: &crate::game::Game<'_>, b: [i32; 3]) -> [i32; 3] {
@@ -61,41 +33,28 @@ fn face_toward(game: &crate::game::Game<'_>, b: [i32; 3]) -> [i32; 3] {
     }
 }
 
-fn face_hit(cell: [i32; 3], face: [i32; 3]) -> crate::game::Hit {
-    crate::game::Hit {
-        inside: false,
-        pos: cell,
-        face,
-        point: [
-            cell[0] as f64 + 0.5 + face[0] as f64 * 0.5,
-            cell[1] as f64 + 0.5 + face[1] as f64 * 0.5,
-            cell[2] as f64 + 0.5 + face[2] as f64 * 0.5,
-        ],
-    }
-}
-
-fn solid(game: &crate::game::Game<'_>, p: [i32; 3]) -> bool {
-    game.res
-        .facts()
-        .get(game.world.block(p[0], p[1], p[2]))
-        .full_collision
-}
-
-/// Can take a placed block's face — same rule as pathfind's floors (full
-/// collision or a slab/stairs).
-fn sturdy(game: &crate::game::Game<'_>, p: [i32; 3]) -> bool {
+/// Can take a placed block's face — same rule as `pf::W::block_solid`
+/// (full collision, or a slab/stairs while `allowWalkOnBottomSlab` is on).
+/// `bottom_slab` comes in from `st.set` because `drive` runs under the
+/// state lock, where building a `pf::W` would deadlock.
+fn sturdy(game: &crate::game::Game<'_>, p: [i32; 3], bottom_slab: bool) -> bool {
     let f = game
         .res
         .facts()
         .get(game.world.block(p[0], p[1], p[2]));
-    f.full_collision || f.name.contains("slab") || f.name.contains("stairs")
+    f.full_collision
+        || (bottom_slab && (f.name.contains("slab") || f.name.contains("stairs")))
 }
 
 /// A sturdy neighbour of `f` and the face that would place `f` on it.
-fn support_face(game: &crate::game::Game<'_>, f: [i32; 3]) -> Option<([i32; 3], [i32; 3])> {
-    for d in [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]] {
+fn support_face(
+    game: &crate::game::Game<'_>,
+    f: [i32; 3],
+    bottom_slab: bool,
+) -> Option<([i32; 3], [i32; 3])> {
+    for d in rt::SUPPORT_DIRS {
         let s = [f[0] + d[0], f[1] + d[1], f[2] + d[2]];
-        if sturdy(game, s) {
+        if sturdy(game, s, bottom_slab) {
             return Some((s, [-d[0], -d[1], -d[2]]));
         }
     }
@@ -254,14 +213,14 @@ pub fn drive(
     let in_water = player.fluids.was_touching_water;
     let eye_in_water = player.fluids.was_eye_in_water;
     let footing = on_ground || in_water;
-    let me = feet(player);
-    let c = center(m.pos);
+    let me = rt::feet(player);
+    let c = rt::center(m.pos);
     // A move ends once we're firmly on its cell — integer feet can hover on
     // the cell edge (aim at the centre flips 180° each tick), so also accept
     // standing within ~0.4 blocks of the centre at the right height.
     let mut arrived = me == m.pos;
     if !arrived
-        && !matches!(m.kind, pf::Kind::Break { .. })
+        && !matches!(m.kind, pf::Kind::Break)
         && (pos.x - c[0]).powi(2) + (pos.z - c[2]).powi(2) < 0.16
         && pos.y > c[1] - 0.6
         && pos.y < c[1] + 1.4
@@ -287,10 +246,10 @@ pub fn drive(
     {
         arrived = false;
     }
-    if arrived && matches!(m.kind, pf::Kind::Pillar) && !solid(game, m.cells[0]) {
+    if arrived && matches!(m.kind, pf::Kind::Pillar) && !rt::solid(game, m.cells[0]) {
         arrived = false;
     }
-    if arrived && !matches!(m.kind, pf::Kind::Break { .. }) {
+    if arrived && !matches!(m.kind, pf::Kind::Break) {
         st.want = rt::Want::default();
         return Out::Done;
     }
@@ -298,7 +257,7 @@ pub fn drive(
         sprint: st.set.sprint,
         ..rt::Want::default()
     };
-    let c = center(m.pos);
+    let c = rt::center(m.pos);
     match m.kind {
         pf::Kind::Walk | pf::Kind::Drop { .. } | pf::Kind::Swim => {
             // A 1-cell swim that can't land in ~5s is pressed against a
@@ -307,7 +266,7 @@ pub fn drive(
             if m.kind == pf::Kind::Swim && ticks_on(m, 3) > 100 {
                 return Out::Failed;
             }
-            aim(game, c);
+            rt::aim(game, c, true);
             w.forward = 1.0;
             // Stay up while crossing water; hop when the route climbs even
             // within what the planner labelled a flat walk (slabs, snow,
@@ -319,7 +278,7 @@ pub fn drive(
             }
         }
         pf::Kind::Step => {
-            aim(game, c);
+            rt::aim(game, c, true);
             w.forward = 1.0;
             // No sprint: a sprint-jump overshoots the ledge and hits the
             // face low. A controlled hop is what mounts a 1-block step.
@@ -327,17 +286,17 @@ pub fn drive(
             w.jump = true;
         }
         pf::Kind::Parkour { .. } => {
-            aim(game, c);
+            rt::aim(game, c, true);
             w.forward = 1.0;
             w.sprint = true;
             w.jump = true;
         }
         pf::Kind::ParkourPlace { .. } => {
             let fl = m.cells[0];
-            if solid(game, fl) {
+            if rt::solid(game, fl) {
                 // Floor's down (placed it last tick, or it already was):
                 // ordinary parkour drive to the landing.
-                aim(game, c);
+                rt::aim(game, c, true);
                 w.forward = 1.0;
                 w.sprint = true;
                 w.jump = true;
@@ -348,14 +307,14 @@ pub fn drive(
                 if !placeable_held(game) {
                     return hold_block(game);
                 }
-                let Some((s, face)) = support_face(game, fl) else {
+                let Some((s, face)) = support_face(game, fl, st.set.bottom_slab) else {
                     return Out::Failed;
                 };
-                let hit = face_hit(s, face);
+                let hit = rt::face_hit(s, face);
                 // Steer toward the landing; the forced hit clicks the
                 // support face regardless of look direction, so the block
                 // lands under us as we cross the gap.
-                aim(game, c);
+                rt::aim(game, c, true);
                 w.forward = 1.0;
                 w.sprint = true;
                 w.jump = true;
@@ -364,13 +323,13 @@ pub fn drive(
             }
         }
         pf::Kind::Ladder { n } => {
-            aim(game, [c[0], pos.y, c[2]]);
+            rt::aim(game, [c[0], pos.y, c[2]], true);
             w.forward = 1.0;
             if n < 0 {
                 w.sneak = true;
             }
         }
-        pf::Kind::Break { .. } => {
+        pf::Kind::Break => {
             // 200-tick fuse on the cells list before we give up.
             if ticks_on(m, 0) > 200 {
                 return Out::Failed;
@@ -380,16 +339,16 @@ pub fn drive(
                 .cells
                 .iter()
                 .copied()
-                .find(|&b| solid(game, b));
+                .find(|&b| rt::solid(game, b));
             match next {
                 Some(b) => {
                     // `toolSelect`: keep the held item when off.
                     if st.set.tool_select {
                         tool_for(game, b);
                     }
-                    aim(game, center(b));
+                    rt::aim(game, rt::center(b), true);
                     // Face the side the player can actually see.
-                    w.hit = Some(face_hit(b, face_toward(game, b)));
+                    w.hit = Some(rt::face_hit(b, face_toward(game, b)));
                     w.attack = true;
                     w.forward = 0.0;
                     st.want = w;
@@ -400,7 +359,7 @@ pub fn drive(
                     return Out::Done;
                 }
                 None => {
-                    aim(game, c);
+                    rt::aim(game, c, true);
                     w.forward = 1.0;
                 }
             }
@@ -408,15 +367,15 @@ pub fn drive(
         pf::Kind::Downward => {
             // Break the floor cell under our feet, then drop in.
             let f = m.cells[0];
-            if solid(game, f) {
+            if rt::solid(game, f) {
                 if ticks_on(m, 0) > 200 {
                     return Out::Failed;
                 }
                 if st.set.tool_select {
                     tool_for(game, f);
                 }
-                aim(game, center(f));
-                w.hit = Some(face_hit(f, [0, 1, 0]));
+                rt::aim(game, rt::center(f), true);
+                w.hit = Some(rt::face_hit(f, [0, 1, 0]));
                 w.attack = true;
                 w.forward = 0.0;
                 st.want = w;
@@ -435,14 +394,14 @@ pub fn drive(
             }
             // Place the listed cells in order (approach support first, then
             // the diagonal floor), hanging each off a neighbour's face.
-            let todo = m.cells.iter().copied().find(|&f| !solid(game, f));
+            let todo = m.cells.iter().copied().find(|&f| !rt::solid(game, f));
             match todo {
                 Some(f) => {
-                    let Some((s, face)) = support_face(game, f) else {
+                    let Some((s, face)) = support_face(game, f, st.set.bottom_slab) else {
                         return Out::Failed;
                     };
-                    let hit = face_hit(s, face);
-                    aim(game, hit.point);
+                    let hit = rt::face_hit(s, face);
+                    rt::aim(game, hit.point, true);
                     w.sneak = true;
                     w.sprint = false;
                     w.forward = 1.0;
@@ -450,7 +409,7 @@ pub fn drive(
                     w.right = true;
                 }
                 None => {
-                    aim(game, c);
+                    rt::aim(game, c, true);
                     w.forward = 1.0;
                 }
             }
@@ -465,25 +424,25 @@ pub fn drive(
             // has vacated the cell — ~1 in 4 jumps — so the bail fuse has to
             // allow many hops, not two seconds.
             let place = m.cells[0];
-            if !solid(game, place) && ticks_on(m, 1) > 200 {
+            if !rt::solid(game, place) && ticks_on(m, 1) > 200 {
                 return Out::Failed;
             }
             w.sneak = false;
             w.jump = true;
-            if !solid(game, place) {
+            if !rt::solid(game, place) {
                 // Still placing: hop in place over the cell and put the block
                 // on the support face under it.
                 w.forward = 0.0;
-                w.hit = Some(face_hit(
+                w.hit = Some(rt::face_hit(
                     [place[0], place[1] - 1, place[2]],
                     [0, 1, 0],
                 ));
                 w.right = true;
-                aim(game, [c[0], pos.y - 1.0, c[2]]);
+                rt::aim(game, [c[0], pos.y - 1.0, c[2]], true);
             } else {
                 // Block's down: steer onto it — jumping in place beside the
                 // new floor never completes the move.
-                aim(game, c);
+                rt::aim(game, c, true);
                 w.forward = 1.0;
             }
         }
@@ -492,9 +451,9 @@ pub fn drive(
                 return hold_block(game);
             }
             let place = m.cells[0];
-            if solid(game, place) {
+            if rt::solid(game, place) {
                 // Floor placed: walk the last step normally.
-                aim(game, c);
+                rt::aim(game, c, true);
                 w.forward = 1.0;
             } else {
                 // Sneak to the edge and place on the support's side face.
@@ -506,9 +465,9 @@ pub fn drive(
                     0,
                     (m.pos[2] - prev[2]).signum(),
                 ];
-                w.hit = Some(face_hit(floor, face));
+                w.hit = Some(rt::face_hit(floor, face));
                 w.right = true;
-                aim(game, center(place));
+                rt::aim(game, rt::center(place), true);
                 w.forward = 1.0;
             }
         }
